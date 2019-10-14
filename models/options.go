@@ -191,21 +191,21 @@ func (m *Option) Init() error {
 		}
 	}
 
-	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "RELATE_BOOK_CACHE").Exist() {
-		option := NewOption()
-		option.OptionValue = "0"
-		option.OptionName = "RELATE_BOOK_CACHE"
-		option.OptionTitle = "推荐书籍缓存时长"
-		if _, err := o.Insert(option); err != nil {
-			return err
-		}
-	}
-
 	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "DEFAULT_SEARCH").Exist() {
 		option := NewOption()
 		option.OptionValue = "book"
 		option.OptionName = "DEFAULT_SEARCH"
 		option.OptionTitle = "默认搜索"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "SEARCH_ACCURACY").Exist() {
+		option := NewOption()
+		option.OptionValue = "50"
+		option.OptionName = "SEARCH_ACCURACY"
+		option.OptionTitle = "搜索精度"
 		if _, err := o.Insert(option); err != nil {
 			return err
 		}
@@ -236,6 +236,76 @@ func (m *Option) Init() error {
 		option.OptionValue = "true"
 		option.OptionName = "LOGIN_GITEE"
 		option.OptionTitle = "是否允许使用码云登录"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "RELATE_BOOK").Exist() {
+		option := NewOption()
+		option.OptionValue = "0"
+		option.OptionName = "RELATE_BOOK"
+		option.OptionTitle = "是否开始关联书籍"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "ALL_CAN_WRITE_BOOK").Exist() {
+		option := NewOption()
+		option.OptionValue = "true"
+		option.OptionName = "ALL_CAN_WRITE_BOOK"
+		option.OptionTitle = "是否都可以创建项目"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "CLOSE_SUBMIT_ENTER").Exist() {
+		option := NewOption()
+		option.OptionValue = "false"
+		option.OptionName = "CLOSE_SUBMIT_ENTER"
+		option.OptionTitle = "是否关闭收录入口"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "CLOSE_OPEN_SOURCE_LINK").Exist() {
+		option := NewOption()
+		option.OptionValue = "true"
+		option.OptionName = "CLOSE_OPEN_SOURCE_LINK"
+		option.OptionTitle = "是否关闭开源项目入口"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "HOUR_REG_NUM").Exist() {
+		option := NewOption()
+		option.OptionValue = "0"
+		option.OptionName = "HOUR_REG_NUM"
+		option.OptionTitle = "同一IP每小时允许注册人数"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "DAILY_REG_NUM").Exist() {
+		option := NewOption()
+		option.OptionValue = "0"
+		option.OptionName = "DAILY_REG_NUM"
+		option.OptionTitle = "同一IP每天允许注册人数"
+		if _, err := o.Insert(option); err != nil {
+			return err
+		}
+	}
+
+	if !o.QueryTable(m.TableNameWithPrefix()).Filter("option_name", "REAL_IP_FIELD").Exist() {
+		option := NewOption()
+		option.OptionValue = "X-Real-Ip"
+		option.OptionName = "REAL_IP_FIELD"
+		option.OptionTitle = "request中获取访客真实IP的header"
 		if _, err := o.Insert(option); err != nil {
 			return err
 		}

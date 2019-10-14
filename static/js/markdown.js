@@ -1,10 +1,12 @@
 $(function () {
     window.addDocumentModalFormHtml = $(this).find("form").html();
     window.editor = editormd("docEditor", {
+        atLink    : false,    // disable @link
+        emailLink : false,    // disable email address auto link
+        emoji : false,       // Support Github emoji, Twitter Emoji(Twemoji), fontAwesome, Editor.md logo emojis.
         width : "100%",
         height : "100%",
         path : "/static/editor.md/lib/",
-        tex  : true,
         toolbar : true,
         placeholder: "本编辑器支持Markdown编辑，左边编写，右边预览",
         imageUpload: true,
@@ -14,11 +16,14 @@ $(function () {
         fileUpload: true,
         fileUploadURL : window.fileUploadURL,
         taskList : true,
+        tex  : true,
         flowChart : true,
+        sequenceDiagram: true,
         htmlDecode : "style,script,iframe,title,onmouseover,onmouseout,style",
         lineNumbers : true,
         tocStartLevel : 1,
         tocm : true,
+        // watch: true,
         saveHTMLToTextarea : true,
         onload : function() {
             this.hideToolbar();
@@ -36,6 +41,8 @@ $(function () {
             this.addKeyMap(keyMap);
 
             var $select_node_id = window.treeCatalog.get_selected();
+
+
             if($select_node_id) {
                 var $select_node = window.treeCatalog.get_node($select_node_id[0])
                 if ($select_node) {
@@ -61,13 +68,14 @@ $(function () {
         },
         onchange : function () {
             resetEditorChanged(true);
-        },
+        }
     });
 
-    window.editor.katexURL={
-        js  : "https://cdn.staticfile.org/KaTeX/0.7.1/katex.min.js",
-        css :"https://cdn.staticfile.org/KaTeX/0.7.1/katex.min.css",
-    };
+
+
+
+
+    // window.editor.tocDropdown=true;
 
     /**
      * 实现标题栏操作
@@ -214,6 +222,9 @@ $(function () {
                 pushDocumentCategory(node);
                 window.selectNode = node;
                 pushVueLists(res.data.attach);
+                // 设置 history
+                if(!window.onpop) history.pushState(node,res.data.doc_name,window.editURI + res.data.identify);
+                window.onpop=false;
             }else{
                 layer.msg("文档加载失败");
             }
@@ -232,6 +243,7 @@ $(function () {
         var node = window.selectNode;
         var content = window.editor.getMarkdown();
         var html = window.editor.getPreviewedHTML();
+        // var html = window.editor.getHTML();
         var version = "";
         var cm = window.editor.cm;
 
@@ -511,4 +523,27 @@ $(function () {
         }
         $("#documentTemplateModal").modal('hide');
     });
+
+    /*
+    *   选中节点，id表示文档的id或者identify
+    * */
+    function selectedNodeById(id){
+        $.each(window.documentCategory,function () {
+            if(id == this.id || id==this.identify) {
+                window.treeCatalog.deselect_all();
+                window.treeCatalog.select_node(this);
+                return false;
+            }
+        });
+    }
+    function selectedNode(node){
+        window.treeCatalog.deselect_all();
+        window.treeCatalog.select_node(node);
+    }
+
+    window.onpopstate=function(e){
+        window.onpop = true;
+        selectedNode(e.state)
+    }
+
 });

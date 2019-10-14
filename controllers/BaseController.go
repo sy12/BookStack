@@ -3,10 +3,8 @@ package controllers
 import (
 	"bytes"
 	"fmt"
-	"net/http"
 	"strconv"
-
-	"github.com/TruthHun/BookStack/models/store"
+	"unicode/utf8"
 
 	"github.com/TruthHun/BookStack/utils"
 
@@ -15,9 +13,6 @@ import (
 	"strings"
 
 	"compress/gzip"
-
-	"io/ioutil"
-	"path/filepath"
 
 	"time"
 
@@ -56,7 +51,8 @@ func (this *BaseController) Prepare() {
 	this.Data["StaticDomain"] = strings.Trim(beego.AppConfig.DefaultString("static_domain", ""), "/")
 	//从session中获取用户信息
 	if member, ok := this.GetSession(conf.LoginSessionName).(models.Member); ok && member.MemberId > 0 {
-		this.Member = &member
+		m, _ := models.NewMember().Find(member.MemberId)
+		this.Member = m
 	} else {
 		//如果Cookie中存在登录信息，从cookie中获取用户信息
 		if cookie, ok := this.GetSecureCookie(conf.GetAppKey(), "login"); ok {
@@ -94,6 +90,14 @@ func (this *BaseController) Prepare() {
 			}
 		}
 	}
+	if v, ok := this.Option["CLOSE_OPEN_SOURCE_LINK"]; ok {
+		this.Data["CloseOpenSourceLink"] = v == "true"
+	}
+
+	if v, ok := this.Option["CLOSE_SUBMIT_ENTER"]; ok {
+		this.Data["CloseSubmitEnter"] = v == "true"
+	}
+
 	this.Data["SiteName"] = this.Sitename
 	this.Data["Friendlinks"] = new(models.FriendLink).GetList(false)
 }
@@ -213,19 +217,6 @@ func (this *BaseController) Sitemap() {
 	this.TplName = "widgets/sitemap.html"
 }
 
-//静态文件，这个加在路由的最后
-func (this *BaseController) StaticFile() {
-	splat := this.GetString(":splat")
-	ext := filepath.Ext(splat)
-	if strings.Contains(beego.AppConfig.String("StaticExt"), strings.ToLower(ext)) {
-		if b, err := ioutil.ReadFile(splat); err == nil {
-			this.Ctx.ResponseWriter.Write(b)
-			return
-		}
-	}
-	this.Abort("404")
-}
-
 func (this *BaseController) loginByMemberId(memberId int) (err error) {
 	member, err := models.NewMember().Find(memberId)
 	if member.MemberId == 0 {
@@ -258,7 +249,7 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 	if err != nil {
 		beego.Error(err)
 	}
-	idx := 0
+	idx := 1
 	if debug {
 		beego.Info("根据summary文件进行排序")
 	}
@@ -270,8 +261,10 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 	doc.Find("li>a").Each(func(i int, selection *goquery.Selection) {
 		if href, ok := selection.Attr("href"); ok && strings.HasPrefix(href, "$") {
 			href = strings.TrimLeft(strings.Replace(href, "/", "-", -1), "$")
-			hrefs[href] = selection.Text()
-			hrefSlice = append(hrefSlice, href)
+			if utf8.RuneCountInString(href) <= 100 {
+				hrefs[href] = selection.Text()
+				hrefSlice = append(hrefSlice, href)
+			}
 		}
 	})
 	if debug {
@@ -297,15 +290,20 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 				CreateTime:   time.Now(),
 				ModifyTime:   time.Now(),
 			}
-			if docId, err := doc.InsertOrUpdate(); err == nil {
-				ModelStore.InsertOrUpdate(models.DocumentStore{
-					DocumentId: int(docId),
-					Markdown:   "[TOC]\n\r\n\r",
-				})
+			// 如果文档标识超过了规定长度（100），则进行忽略
+			if utf8.RuneCountInString(identify) <= 100 {
+				if docId, err := doc.InsertOrUpdate(); err == nil {
+					if err = ModelStore.InsertOrUpdate(models.DocumentStore{DocumentId: int(docId), Markdown: "[TOC]\n\r\n\r"}); err != nil {
+						beego.Error(err.Error())
+					}
+				}
 			}
 		}
 
 	}
+
+	// 重置所有之前的文档排序
+	_, _ = qs.Update(orm.Params{"order_sort": 100000})
 
 	doc.Find("a").Each(func(i int, selection *goquery.Selection) {
 		docName := selection.Text()
@@ -345,6 +343,7 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 		}
 		idx++
 	})
+
 	if len(hrefs) > 0 { //如果有新创建的文档，则再调用一遍，用于处理排序
 		this.replaceLinks(bookIdentify, htmlStr, true)
 	}
@@ -366,6 +365,7 @@ func (this *BaseController) replaceLinks(bookIdentify string, docHtml string, is
 		docs []models.Document
 		o    = orm.NewOrm()
 	)
+
 	o.QueryTable("md_books").Filter("identify", bookIdentify).One(&book, "book_id")
 	if book.BookId > 0 {
 		o.QueryTable("md_documents").Filter("book_id", book.BookId).Limit(5000).All(&docs, "identify", "document_id")
@@ -383,7 +383,6 @@ func (this *BaseController) replaceLinks(bookIdentify string, docHtml string, is
 
 			//替换文档内容中的链接
 			if gq, err := goquery.NewDocumentFromReader(strings.NewReader(docHtml)); err == nil {
-
 				gq.Find("a").Each(func(i int, selection *goquery.Selection) {
 					if href, ok := selection.Attr("href"); ok && strings.HasPrefix(href, "$") {
 						if slice := strings.Split(href, "#"); len(slice) > 1 {
@@ -413,6 +412,7 @@ func (this *BaseController) replaceLinks(bookIdentify string, docHtml string, is
 			}
 		}
 	}
+
 	return docHtml
 }
 
@@ -429,7 +429,7 @@ func (this *BaseController) Crawl() {
 		intelligence, _ := this.GetInt("intelligence") //是否是强力采集，强力采集，使用Chrome
 		contType, _ := this.GetInt("type")
 		diySel := this.GetString("diy")
-		content, err := utils.CrawlHtml2Markdown(urlStr, contType, force, intelligence, diySel, []string{})
+		content, err := utils.CrawlHtml2Markdown(urlStr, contType, force, intelligence, diySel, []string{}, nil)
 		if err != nil {
 			this.JsonResult(1, "采集失败："+err.Error())
 		}
@@ -453,36 +453,4 @@ func (this *BaseController) SetFollow() {
 		this.JsonResult(0, "您已经成功取消了关注")
 	}
 	this.JsonResult(0, "您已经成功关注了Ta")
-}
-
-// 项目静态文件
-func (this *BaseController) ProjectsFile() {
-	prefix := "projects/"
-	object := prefix + this.GetString(":splat")
-
-	//这里的时间只是起到缓存的作用
-	t, _ := time.Parse("2006-01-02 15:04:05", "2006-01-02 15:04:05")
-	date := t.Format(http.TimeFormat)
-	since := this.Ctx.Request.Header.Get("If-Modified-Since")
-	if since == date {
-		this.Ctx.ResponseWriter.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	if utils.StoreType == utils.StoreOss { //oss
-		reader, err := store.NewOss().GetFileReader(object)
-		if err != nil {
-			beego.Error(err.Error())
-			this.Abort("404")
-		}
-		b, err := ioutil.ReadAll(reader)
-		if err != nil {
-			beego.Error(err.Error())
-			this.Abort("404")
-		}
-		this.Ctx.ResponseWriter.Header().Set("Last-Modified", date)
-		this.Ctx.ResponseWriter.Write(b)
-	} else { //local
-		this.Abort("404")
-	}
 }

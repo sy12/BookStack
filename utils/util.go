@@ -2,10 +2,19 @@ package utils
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io/ioutil"
 	"os"
+	"path"
+	"reflect"
+	"sync"
+
+	"github.com/astaxie/beego/context"
+
+	"github.com/disintegration/imaging"
 
 	"strconv"
 	"strings"
@@ -19,6 +28,7 @@ import (
 
 	"net/http"
 	"net/mail"
+	"net/url"
 
 	"path/filepath"
 
@@ -39,16 +49,20 @@ import (
 
 //更多存储类型有待扩展
 const (
-	Version           = "1.6"
-	StoreLocal string = "local"
-	StoreOss   string = "oss"
+	StoreLocal  string = "local"
+	StoreOss    string = "oss"
+	VirtualRoot string = "virtualroot"
 )
 
 //分词器
 var (
+	Version     string = "unknown"
+	GitHash     string = "unknown"
+	BuildAt     string = "unknown"
 	Segmenter   sego.Segmenter
-	BasePath, _        = filepath.Abs(filepath.Dir(os.Args[0]))
-	StoreType   string = beego.AppConfig.String("store_type") //存储类型
+	BasePath, _ = filepath.Abs(filepath.Dir(os.Args[0]))
+	StoreType   = beego.AppConfig.String("store_type") //存储类型
+	langs       sync.Map
 )
 
 func init() {
@@ -56,6 +70,27 @@ func init() {
 	go func() {
 		Segmenter.LoadDictionary(BasePath + "/dictionary/dictionary.txt")
 	}()
+	langs.Store("zh", "中文")
+	langs.Store("en", "英文")
+	langs.Store("other", "其他")
+}
+
+func PrintInfo() {
+	fmt.Println("Service: ", "BookStack")
+	fmt.Println("Version: ", Version)
+	fmt.Println("BuildAt: ", BuildAt)
+	fmt.Println("GitHash: ", GitHash)
+}
+
+func InitVirtualRoot() {
+	os.MkdirAll(VirtualRoot, os.ModePerm)
+}
+
+func GetLang(lang string) string {
+	if val, ok := langs.Load(lang); ok {
+		return val.(string)
+	}
+	return "中文"
 }
 
 //分词
@@ -132,28 +167,128 @@ func RenderDocumentById(id int) {
 }
 
 //使用chrome采集网页HTML
-func CrawlByChrome(urlStr string) (b []byte, err error) {
-	if strings.Contains(urlStr, "bookstack") {
+func CrawlByChrome(urlStr string, bookIdentify string) (cont string, err error) {
+	if strings.Contains(strings.ToLower(urlStr), "bookstack") {
 		return
 	}
-	var args []string
+	var (
+		args   []string
+		b      []byte
+		folder string
+	)
+
 	name := beego.AppConfig.DefaultString("chrome", "chromium-browser")
-	if ok, _ := beego.AppConfig.Bool("puppeteer"); ok {
-		name = "node"
+	ok, _ := beego.AppConfig.Bool("puppeteer")
+	selector, isScreenshot := ScreenShotProjects.Load(bookIdentify)
+	if ok || isScreenshot {
+		name = "node" // 读取截屏信息
 		args = []string{"crawl.js", "--url", urlStr}
+		if isScreenshot {
+			folder = fmt.Sprintf("cache/screenshots/" + bookIdentify + "/" + MD5Sub16(urlStr))
+			os.MkdirAll(folder, os.ModePerm)
+			args = append(args, "--folder", folder, "--selector", selector.(string))
+		}
 	} else { // chrome
 		args = []string{"--headless", "--disable-gpu", "--dump-dom", "--no-sandbox", urlStr}
 	}
 	cmd := exec.Command(name, args...)
-
-	// 超过10秒，杀掉进程，避免长期占用
-	time.AfterFunc(30*time.Second, func() {
+	expire := 180
+	if isScreenshot {
+		expire = 300
+	}
+	time.AfterFunc(time.Duration(expire)*time.Second, func() {
 		if cmd.Process.Pid != 0 {
 			cmd.Process.Kill()
 		}
 	})
 
-	return cmd.Output()
+	b, err = cmd.Output()
+	cont = string(b)
+
+	if isScreenshot {
+		pngFile := filepath.Join(folder, "screenshot.png")
+		jsonFile := filepath.Join(folder, "screenshot.json")
+		imagesMap := cropScreenshot(selector.(string), jsonFile, pngFile)
+		if len(imagesMap) > 0 {
+			doc, errDoc := goquery.NewDocumentFromReader(strings.NewReader(cont))
+			if errDoc != nil {
+				beego.Error(errDoc)
+			} else {
+				for ele, images := range imagesMap {
+					doc.Find(ele).Each(func(i int, selection *goquery.Selection) {
+						if img, ok := images[i]; ok {
+							htmlStr := fmt.Sprintf(`<div><img src="$%v"/></div>`, img)
+							selection.AfterHtml(htmlStr)
+							selection.Remove()
+						}
+					})
+				}
+				cont, err = doc.Find("body").Html()
+			}
+		}
+	}
+
+	return
+}
+
+func cropScreenshot(selector, jsonFile, pngFile string) (images map[string]map[int]string) {
+	ele := strings.Split(selector, ",")
+	images = make(map[string]map[int]string)
+	b, err := ioutil.ReadFile(jsonFile)
+	if err != nil {
+		beego.Error(err.Error())
+		return
+	}
+	info := &ScreenShotInfo{}
+	if err = json.Unmarshal(b, info); err != nil {
+		beego.Error(err.Error())
+		return
+	}
+
+	if len(ele) != len(info.Data) {
+		return
+	}
+
+	img, err := imaging.Open(pngFile)
+	if err != nil {
+		beego.Error(err.Error())
+		return
+	}
+
+	for idx, item := range info.Data {
+		ele[idx] = strings.TrimSpace(ele[idx])
+		images[ele[idx]] = make(map[int]string)
+		for idx2, item2 := range item {
+			imgItem := imaging.Crop(img, image.Rect(int(item2.X), int(item2.Y), int(item2.X+item2.Width), int(item2.Y+item2.Height)))
+			saveName := fmt.Sprintf(pngFile+"-%v-%v.png", idx, idx2)
+			imaging.Save(imgItem, saveName)
+			images[ele[idx]][idx2] = saveName
+		}
+	}
+	return
+}
+
+// 图片缩放居中裁剪
+//图片缩放居中裁剪
+//@param        file        图片文件
+//@param        width       图片宽度
+//@param        height      图片高度
+//@return       err         错误
+func CropImage(file string, width, height int) (err error) {
+	var img image.Image
+	img, err = imaging.Open(file)
+	if err != nil {
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(file))
+	switch ext {
+	case ".jpeg", ".jpg", ".png", ".gif":
+		img = imaging.Fill(img, width, height, imaging.Center, imaging.CatmullRom)
+	default:
+		err = errors.New("unsupported image format")
+		return
+	}
+	return imaging.Save(img, file)
 }
 
 //采集HTML并把相对链接和相对图片
@@ -162,175 +297,204 @@ func CrawlByChrome(urlStr string) (b []byte, err error) {
 //intelligence:是否是智能提取，智能提取，使用html2article，否则提取body
 //diySelecter:自定义选择器
 //注意：由于参数问题，采集并下载图片的话，在headers中加上key为"project"的字段，值为文档项目的标识
-func CrawlHtml2Markdown(urlstr string, contType int, force bool, intelligence int, diySelector string, excludeSelector []string, headers ...map[string]string) (cont string, err error) {
+func CrawlHtml2Markdown(urlstr string, contType int, force bool, intelligence int, diySelector string, excludeSelector []string, links map[string]string, headers ...map[string]string) (cont string, err error) {
 
 	//记录已经存在了的图片，避免重复图片出现重复采集的情况
 	var existImage bool
+
+	from := "\r\n<!-- 原文：" + urlstr + " -->"
+
 	imageMap := make(map[string]string)
 
 	if strings.Contains(urlstr, "bookstack.cn") {
 		return
 	}
 
+	// 默认记录到数据库中的图片路径
+	//save := src
+	project := ""
+	for _, header := range headers {
+		if val, ok := header["project"]; ok {
+			project = val
+		}
+	}
+
 	if force { //强力模式
-		var b []byte
-		b, err = CrawlByChrome(urlstr)
-		cont = string(b)
+		cont, err = CrawlByChrome(urlstr, project)
 	} else {
 		req := util.BuildRequest("get", urlstr, "", "", "", true, false, headers...)
-		req.SetTimeout(10*time.Second, 10*time.Second)
+		req.SetTimeout(30*time.Second, 30*time.Second)
 		cont, err = req.String()
 	}
+
+	cont = strings.Replace(cont, "¶", "", -1)
 
 	if err != nil {
 		return
 	}
 
-	//http://www.bookstack.cn/login.html
-	slice := strings.Split(strings.TrimSpace(urlstr), "/")
-	if sliceLen := len(slice); sliceLen > 2 {
-		var doc *goquery.Document
-		doc, err = goquery.NewDocumentFromReader(strings.NewReader(cont))
-		if err != nil {
-			return
-		}
+	var doc *goquery.Document
+	doc, err = goquery.NewDocumentFromReader(strings.NewReader(cont))
+	if err != nil {
+		return
+	}
 
-		//遍历a标签替换相对链接
-		doc.Find("a").Each(func(i int, selection *goquery.Selection) {
-			//存在href，且不以http://和https://开头
-			if href, ok := selection.Attr("href"); ok && (!strings.HasPrefix(strings.ToLower(href), "http://") && !strings.HasPrefix(strings.ToLower(href), "https://") && !strings.HasPrefix(strings.ToLower(href), "#")) {
-				if strings.HasPrefix(href, "/") {
-					selection.SetAttr("href", strings.Join(slice[0:3], "/")+href)
-				} else {
-					l := strings.Count(href, "../")
-					//需要多减1，因为"http://"或"https://"后面多带一个斜杠
-					selection.SetAttr("href", strings.Join(slice[0:sliceLen-l-1], "/")+"/"+strings.TrimLeft(href, "./"))
-				}
-			}
-		})
+	//遍历a标签替换相对链接
+	doc.Find("a").Each(func(i int, selection *goquery.Selection) {
+		//存在href，且不以http://和https://开头
+		if href, ok := selection.Attr("href"); ok {
+			href = JoinURL(urlstr, href)
 
-		//遍历替换图片相对链接
-		doc.Find("img").Each(func(i int, selection *goquery.Selection) {
-			//存在src，且不以http://和https://开头
-			if src, ok := selection.Attr("src"); ok {
-				//链接补全
-				srcLower := strings.ToLower(src)
-				if !strings.HasPrefix(srcLower, "http://") &&
-					!strings.HasPrefix(srcLower, "https://") &&
-					!strings.HasPrefix(srcLower, "data:image/") { //非base64的任意
-					if strings.HasPrefix(src, "/") { //以斜杠开头
-						src = strings.Join(slice[0:3], "/") + src
-					} else {
-						l := strings.Count(src, "../")
-						//需要多减1，因为"http://"或"https://"后面多带一个斜杠
-						src = strings.Join(slice[0:sliceLen-l-1], "/") + "/" + strings.TrimLeft(src, "./")
-					}
-				}
-
-				// 默认记录到数据库中的图片路径
-				//save := src
-				project := ""
-				for _, header := range headers {
-					if val, ok := header["project"]; ok {
-						project = val
-					}
-				}
-				if project != "" {
-					var exist string
-					if exist, existImage = imageMap[srcLower]; !existImage {
-						tmpFile, err := DownImage(src, headers...)
-						if err == nil {
-							defer os.Remove(tmpFile) //删除文件
-							switch StoreType {
-							case StoreLocal:
-								src = "/uploads/projects/" + project + "/" + filepath.Base(tmpFile)
-								store.ModelStoreLocal.MoveToStore(tmpFile, strings.TrimPrefix(src, "/"))
-							case StoreOss:
-								src = "projects/" + project + "/" + filepath.Base(tmpFile)
-								store.ModelStoreOss.MoveToOss(tmpFile, src, true)
-								src = "/" + src
-							}
-							imageMap[srcLower] = src
-						} else {
-							beego.Error(err.Error())
-						}
-					} else {
-						src = exist
-					}
-				}
-				selection.SetAttr("src", src)
-			}
-		})
-
-		//h1-h6标题中不要存在链接或者图片，所以提取文本
-		Hs := []string{"h1", "h2", "h3", "h4", "h5", "h6"}
-		for _, tag := range Hs {
-			doc.Find(tag).Each(func(i int, selection *goquery.Selection) {
-				//存在href，且不以http://和https://开头
-				selection.SetText(selection.Text())
-			})
-		}
-
-		//排除标签
-		excludeSelector = append(excludeSelector, "script", "style")
-		for _, sel := range excludeSelector {
-			doc.Find(sel).Remove()
-		}
-
-		diySelector = strings.TrimSpace(diySelector)
-
-		cont, err = doc.Html()
-
-		if intelligence == 1 { //智能提取
-			ext, err := html2article.NewFromHtml(cont)
-			if err != nil {
-				return cont, err
-			}
-			article, err := ext.ToArticle()
-			if err != nil {
-				return cont, err
-			}
-			switch contType {
-			case 1: //=>html
-				cont = article.Html + "\n原文：\n> " + urlstr
-			case 2: //=>text
-				cont = article.Content + fmt.Sprintf("\n原文：\n> %v", urlstr)
-			default: //0 && other=>markdown
-				cont = html2md.Convert(article.Html) + fmt.Sprintf("\n\r\n\r原文:\n> %v", urlstr)
-			}
-		} else if intelligence == 2 && diySelector != "" { //自定义提取
-			if htmlstr, err := doc.Find(diySelector).Html(); err != nil {
-				return "", err
+			if link, ok := links[strings.TrimRight(href, "/")]; ok {
+				href = "$" + link
 			} else {
-				switch contType {
-				case 1: //=>html
-					cont = htmlstr + "\n\r\n\r> 原文： " + urlstr
-				case 2: //=>text
-					cont = doc.Find(diySelector).Text() + fmt.Sprintf("\n\r\n\r> 原文: %v", urlstr)
-				default: //0 && other=>markdown
-					cont = html2md.Convert(htmlstr) + fmt.Sprintf("\n\r\n\r> 原文: %v", urlstr)
+				slice := strings.Split(href, "#")
+				if len(slice) > 1 {
+					if link, ok = links[strings.TrimRight(slice[0], "/")]; ok {
+						href = "$" + link + "#" + strings.Join(slice[1:], "#")
+					}
 				}
 			}
-		} else { //全文
-			//移除body中的所有js标签
-			doc.Find("script").Each(func(i int, selection *goquery.Selection) {
-				selection.Remove()
-			})
+			selection.SetAttr("href", href)
+		}
+	})
 
+	//遍历替换图片相对链接
+	doc.Find(diySelector).Find("img").Each(func(i int, selection *goquery.Selection) {
+		//存在src，且不以http://和https://开头
+		if src, ok := selection.Attr("src"); ok {
+			//链接补全
+			srcLower := strings.ToLower(src)
+			if !strings.HasPrefix(srcLower, "data:image/") && !strings.HasPrefix(srcLower, "$") {
+				src = JoinURL(urlstr, src)
+			}
+			if project != "" {
+				var exist string
+				if exist, existImage = imageMap[srcLower]; !existImage {
+					tmpFile, err := DownImage(src, headers...)
+					if err == nil {
+						defer os.Remove(tmpFile) //删除文件
+						switch StoreType {
+						case StoreLocal:
+							src = "/uploads/projects/" + project + "/" + filepath.Base(tmpFile)
+							store.ModelStoreLocal.MoveToStore(tmpFile, strings.TrimPrefix(src, "/"))
+						case StoreOss:
+							src = "projects/" + project + "/" + filepath.Base(tmpFile)
+							store.ModelStoreOss.MoveToOss(tmpFile, src, true)
+							src = "/" + src
+						}
+						imageMap[srcLower] = src
+					} else {
+						beego.Error(err.Error())
+					}
+				} else {
+					src = exist
+				}
+			}
+			selection.SetAttr("src", src)
+		}
+	})
+
+	// 处理svg
+	doc = HandleSVG(doc, project)
+
+	//h1-h6标题中不要存在链接或者图片，所以提取文本
+	Hs := []string{"h1", "h2", "h3", "h4", "h5", "h6"}
+	for _, tag := range Hs {
+		doc.Find(tag).Each(func(i int, selection *goquery.Selection) {
+			//存在href，且不以http://和https://开头
+			selection.SetText(selection.Text())
+		})
+	}
+
+	//排除标签
+	excludeSelector = append(excludeSelector, "script", "style")
+	for _, sel := range excludeSelector {
+		doc.Find(sel).Remove()
+	}
+
+	diySelector = strings.TrimSpace(diySelector)
+
+	cont, err = doc.Html()
+
+	if intelligence == 1 { //智能提取
+		ext, err := html2article.NewFromHtml(cont)
+		if err != nil {
+			return cont, err
+		}
+		article, err := ext.ToArticle()
+		if err != nil {
+			return cont, err
+		}
+		switch contType {
+		case 1: //=>html
+			cont = article.Html
+		case 2: //=>text
+			cont = article.Content
+		default: //0 && other=>markdown
+			cont = html2md.Convert(article.Html)
+		}
+	} else if intelligence == 2 && diySelector != "" { //自定义提取
+		if htmlstr, err := doc.Find(diySelector).Html(); err != nil {
+			return "", err
+		} else {
 			switch contType {
 			case 1: //=>html
-				htmlstr, _ := doc.Find("body").Html()
-				cont = htmlstr + "\n\n\n> 原文：" + urlstr
+				cont = htmlstr
 			case 2: //=>text
-				cont = doc.Find("body").Text() + fmt.Sprintf("\n\r\n\r> 原文: %v", urlstr)
+				cont = doc.Find(diySelector).Text()
 			default: //0 && other=>markdown
-				htmlstr, _ := doc.Find("body").Html()
-				cont = html2md.Convert(htmlstr) + fmt.Sprintf("\n\r\n\r> 原文: %v", urlstr)
+				cont = html2md.Convert(htmlstr)
 			}
+		}
+	} else { //全文
+
+		switch contType {
+		case 1: //=>html
+			htmlstr, _ := doc.Find("body").Html()
+			cont = htmlstr
+		case 2: //=>text
+			cont = doc.Find("body").Text()
+		default: //0 && other=>markdown
+			htmlstr, _ := doc.Find("body").Html()
+			cont = html2md.Convert(htmlstr)
 		}
 	}
 
+	cont = cont + from
+
 	return
+}
+
+func HandleSVG(doc *goquery.Document, project string) *goquery.Document {
+	// svg 图片处理
+	doc.Find("svg").Each(func(i int, selection *goquery.Selection) {
+		ret, _ := selection.Parent().Html()
+		width, height := "", ""
+		if val, ok := selection.Attr("width"); ok {
+			width = fmt.Sprintf(` width="%v"`, val)
+		}
+		if val, ok := selection.Attr("height"); ok {
+			height = fmt.Sprintf(` height="%v"`, val)
+		}
+		ret = fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg"%v%v version="1.1">%v</svg>`, width, height, ret)
+		tmpFile := cryptil.Md5Crypt(ret) + ".svg"
+		src := ""
+		ioutil.WriteFile(tmpFile, []byte(ret), os.ModePerm)
+		switch StoreType {
+		case StoreLocal:
+			src = "/uploads/projects/" + project + "/" + filepath.Base(tmpFile)
+			store.ModelStoreLocal.MoveToStore(tmpFile, strings.TrimPrefix(src, "/"))
+		case StoreOss:
+			src = "projects/" + project + "/" + filepath.Base(tmpFile)
+			store.ModelStoreOss.MoveToOss(tmpFile, src, true)
+			src = "/" + src
+		}
+		selection.AfterHtml(fmt.Sprintf(`<img src="%v"/>`, src))
+		selection.Remove()
+		os.Remove(tmpFile) // 删除临时文件
+	})
+	return doc
 }
 
 //操作图片显示
@@ -535,6 +699,13 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 	file := cryptil.Md5Crypt(src)
 	filename = "cache/" + file
 	srcLower := strings.ToLower(src)
+	if strings.HasPrefix(srcLower, "$") {
+		//_, err = CopyFile(filename, strings.TrimPrefix(srcLower, "$"))
+		filename = filename + ext
+		err = os.Rename(strings.TrimPrefix(src, "$"), filename)
+		return
+	}
+
 	if strings.HasPrefix(srcLower, "data:image/") && strings.Contains(srcLower, ";base64,") { //base64的图片
 		slice := strings.Split(src, ";base64,")
 		if len(slice) >= 2 {
@@ -546,23 +717,161 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 			}
 			err = ioutil.WriteFile(filename, b, os.ModePerm)
 		}
-	} else { //url链接图片
-		resp, err = util.BuildRequest("get", src, src, "", "", true, false, headers...).Response()
+		return
+	}
+
+	//url链接图片
+	resp, err = util.BuildRequest("get", src, src, "", "", true, false, headers...).Response()
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if tmp := strings.TrimPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "image/"); tmp != "" {
+		if strings.HasPrefix(strings.ToLower(tmp), "svg") {
+			tmp = "svg"
+		}
+		ext = "." + tmp
+	} else {
+		ext = strings.ToLower(filepath.Ext(srcLower))
+	}
+	filename = filename + ext
+	b, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	err = ioutil.WriteFile(filename, b, os.ModePerm)
+	return
+}
+
+// 截取md5前8个字符
+func MD5Sub16(str string) string {
+	return cryptil.Md5Crypt(str)[0:16]
+}
+
+func JoinURL(rawURL string, urlPath string) string {
+	rawURL = strings.TrimSpace(rawURL)
+
+	lowerURLPath := strings.ToLower(urlPath)
+	if strings.HasPrefix(lowerURLPath, "//") {
+		return "http:" + urlPath
+	}
+	if strings.HasPrefix(lowerURLPath, "http://") || strings.HasPrefix(lowerURLPath, "https://") {
+		return urlPath
+	}
+
+	if !strings.HasSuffix(rawURL, "/") {
+		slice := strings.Split(rawURL, "/")
+		if l := len(slice); l > 0 {
+			rawURL = strings.Join(slice[:l-1], "/")
+		}
+	}
+	u, err := url.Parse(rawURL)
+
+	if err != nil {
+		return rawURL
+	}
+
+	if strings.HasPrefix(urlPath, "/") {
+		return u.Scheme + "://" + u.Host + "/" + strings.TrimLeft(urlPath, "/")
+	}
+	u.Path = path.Join(strings.TrimRight(u.Path, "/")+"/", urlPath)
+	// return u.String() // 会对中文进行编码
+	return u.Scheme + "://" + u.Host + "/" + strings.Trim(u.Path, "/")
+}
+
+type ReflectVal struct {
+	T reflect.Type
+	V reflect.Value
+}
+
+func CopyObject(src, dst interface{}) {
+	var srcMap = make(map[string]ReflectVal)
+
+	vs := reflect.ValueOf(src)
+	ts := reflect.TypeOf(src)
+	vd := reflect.ValueOf(dst)
+	td := reflect.TypeOf(dst)
+
+	ls := vs.Elem().NumField()
+	for i := 0; i < ls; i++ {
+		srcMap[ts.Elem().Field(i).Name] = ReflectVal{
+			T: vs.Elem().Field(i).Type(),
+			V: vs.Elem().Field(i),
+		}
+	}
+
+	ld := vd.Elem().NumField()
+	for i := 0; i < ld; i++ {
+		n := td.Elem().Field(i).Name
+		t := vd.Elem().Field(i).Type()
+		if v, ok := srcMap[n]; ok && v.T == t && vd.Elem().Field(i).CanSet() {
+			vd.Elem().Field(i).Set(v.V)
+		}
+	}
+}
+
+func RangeNumber(val, min, max int) int {
+	if val > max {
+		return max
+	}
+	if val < min {
+		return min
+	}
+	return val
+}
+
+func DeleteFile(file string) {
+	file = strings.TrimPrefix(file, "./")
+	fileLower := strings.ToLower(file)
+	if strings.HasPrefix(fileLower, "https://") || strings.HasPrefix(fileLower, "http://") {
+		return
+	}
+	switch StoreType {
+	case StoreLocal:
+		go store.ModelStoreLocal.DelFromFolder(file)
+	case StoreOss:
+		go store.ModelStoreOss.DelOssFolder(file)
+	}
+}
+
+func UploadFile(src, dest string) (err error) {
+	switch StoreType {
+	case StoreOss: //oss存储
+		err = store.ModelStoreOss.MoveToOss(src, strings.TrimLeft(dest, "./"), false, false)
 		if err != nil {
-			return
+			beego.Error(err.Error())
 		}
-		defer resp.Body.Close()
-		if tmp := strings.TrimPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "image/"); tmp != "" {
-			ext = "." + tmp
-		} else {
-			ext = strings.ToLower(filepath.Ext(srcLower))
-		}
-		filename = filename + ext
-		b, err = ioutil.ReadAll(resp.Body)
+	case StoreLocal: //本地存储
+		err = store.ModelStoreLocal.MoveToStore(src, dest)
 		if err != nil {
-			return
+			beego.Error(err.Error())
 		}
-		err = ioutil.WriteFile(filename, b, os.ModePerm)
+	}
+	return
+}
+
+// 获取ip地址
+func GetIP(ctx *context.Context, field string) (ip string) {
+	ip = ctx.Request.Header.Get(field)
+	if ip != "" {
+		return
+	}
+	ip = ctx.Request.Header.Get("X-Real-Ip")
+	if ip != "" {
+		return
+	}
+	ip = ctx.Request.Header.Get("X-Forwarded-For")
+	if ip != "" {
+		return
+	}
+	ip = ctx.Request.Header.Get("Remote-Addr")
+	if ip != "" {
+		return
+	}
+
+	slice := strings.Split(ctx.Request.RemoteAddr, ":")
+	if len(slice) == 2 && !strings.Contains(ctx.Request.RemoteAddr, ",") {
+		return slice[0]
 	}
 	return
 }

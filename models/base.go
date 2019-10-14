@@ -2,7 +2,6 @@ package models
 
 import (
 	"fmt"
-
 	"os"
 
 	"strconv"
@@ -16,6 +15,10 @@ import (
 	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/orm"
 )
+
+func Init() {
+	initAPI()
+}
 
 //设置增减
 //@param            table           需要处理的数据表
@@ -152,4 +155,61 @@ func SitemapUpdate(domain string) {
 
 	}
 	Sitemap.CreateSitemapIndex(si, "sitemap.xml")
+}
+
+// 统计书籍分类
+var counting = false
+
+type Count struct {
+	Cnt        int
+	CategoryId int
+}
+
+func CountCategory() {
+	if counting {
+		return
+	}
+	counting = true
+	defer func() {
+		counting = false
+	}()
+
+	var count []Count
+
+	o := orm.NewOrm()
+	sql := "select count(bc.id) cnt, bc.category_id from md_book_category bc left join md_books b on b.book_id=bc.book_id where b.privately_owned=0 group by bc.category_id"
+	o.Raw(sql).QueryRows(&count)
+	if len(count) == 0 {
+		return
+	}
+
+	var cates []Category
+	tableCate := "md_category"
+	o.QueryTable(tableCate).All(&cates, "id", "pid", "cnt")
+	if len(cates) == 0 {
+		return
+	}
+
+	var err error
+
+	o.Begin()
+	defer func() {
+		if err != nil {
+			o.Rollback()
+		} else {
+			o.Commit()
+		}
+	}()
+
+	o.QueryTable(tableCate).Update(orm.Params{"cnt": 0})
+	cateChild := make(map[int]int)
+	for _, item := range count {
+		if item.Cnt > 0 {
+			cateChild[item.CategoryId] = item.Cnt
+			_, err = o.QueryTable(tableCate).Filter("id", item.CategoryId).Update(orm.Params{"cnt": item.Cnt})
+			if err != nil {
+				return
+			}
+		}
+	}
 }

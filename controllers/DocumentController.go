@@ -84,10 +84,10 @@ func isReadable(identify, token string, this *DocumentController) *models.BookRe
 			if token != "" && strings.EqualFold(token, book.PrivateToken) {
 				this.SetSession(identify, token)
 			} else if token, ok := this.GetSession(identify).(string); !ok || !strings.EqualFold(token, book.PrivateToken) {
-				this.Abort("403")
+				this.Abort("404")
 			}
 		} else if !isOk {
-			this.Abort("403")
+			this.Abort("404")
 		}
 	}
 
@@ -135,6 +135,7 @@ func (this *DocumentController) Index() {
 	}
 
 	this.TplName = "document/intro.html"
+	bookResult.Lang = utils.GetLang(bookResult.Lang)
 	this.Data["Book"] = bookResult
 
 	switch tab {
@@ -145,15 +146,21 @@ func (this *DocumentController) Index() {
 	this.Data["Qrcode"] = new(models.Member).GetQrcodeByUid(bookResult.MemberId)
 	this.Data["MyScore"] = new(models.Score).BookScoreByUid(this.Member.MemberId, bookResult.BookId)
 	this.Data["Tab"] = tab
+	if beego.AppConfig.DefaultBool("showWechatCode", false) && bookResult.PrivatelyOwned == 0 {
+		wechatCode := models.NewWechatCode()
+		go wechatCode.CreateWechatCode(bookResult.BookId) //如果已经生成了小程序码，则不会再生成
+		this.Data["Wxacode"] = wechatCode.GetCode(bookResult.BookId)
+	}
 
-	//当前默认展示30条评论
-	this.Data["Comments"], _ = new(models.Comments).BookComments(1, 30, bookResult.BookId)
+	//当前默认展示100条评论
+	this.Data["Comments"], _ = new(models.Comments).Comments(1, 100, bookResult.BookId, 1)
 	this.Data["Menu"], _ = new(models.Document).GetMenuTop(bookResult.BookId)
 	this.GetSeoByPage("book_info", map[string]string{
 		"title":       "《" + bookResult.BookName + "》",
 		"keywords":    bookResult.Label,
 		"description": bookResult.Description,
 	})
+	this.Data["RelateBooks"] = models.NewRelateBook().Lists(bookResult.BookId)
 }
 
 //阅读文档.
@@ -183,26 +190,24 @@ func (this *DocumentController) Read() {
 		doc, err = doc.Find(docId) //文档id
 		if err != nil {
 			beego.Error(err)
-			this.Abort("500")
+			this.Abort("404")
 		}
 	} else {
 		//此处的id是字符串，标识文档标识，根据文档标识和文档所属的书的id作为key去查询
 		doc, err = doc.FindByBookIdAndDocIdentify(bookResult.BookId, id) //文档标识
 		if err != nil {
-			beego.Error(err, docId, id, bookResult)
-			this.Abort("500")
+			if err != orm.ErrNoRows {
+				beego.Error(err, docId, id, bookResult)
+			}
+			this.Abort("404")
 		}
 	}
 
 	if doc.BookId != bookResult.BookId {
-		this.Abort("403")
+		this.Abort("404")
 	}
 
-	attach, err := models.NewAttachment().FindListByDocumentId(doc.DocumentId)
-	if err == nil {
-		doc.AttachList = attach
-	}
-
+	bodyText := ""
 	if doc.Release != "" {
 		query, err := goquery.NewDocumentFromReader(bytes.NewBufferString(doc.Release))
 		if err != nil {
@@ -215,15 +220,23 @@ func (this *DocumentController) Read() {
 						contentSelection.SetAttr("src", src)
 					}
 				}
+				if alt, _ := contentSelection.Attr("alt"); alt == "" {
+					contentSelection.SetAttr("alt", doc.DocumentName+" - 图"+fmt.Sprint(i+1))
+				}
 			})
-			html, err := query.Html()
+			html, err := query.Find("body").Html()
 			if err != nil {
 				beego.Error(err)
 			} else {
 				doc.Release = html
 			}
 		}
+		bodyText = query.Find(".markdown-toc").Text()
+	}
 
+	attach, err := models.NewAttachment().FindListByDocumentId(doc.DocumentId)
+	if err == nil {
+		doc.AttachList = attach
 	}
 
 	//文档阅读人次+1
@@ -246,15 +259,24 @@ func (this *DocumentController) Read() {
 			beego.Error(err.Error())
 		}
 	}
-
-	//SEO
-	this.GetSeoByPage("book_read", map[string]string{
+	parentTitle := doc.GetParentTitle(doc.ParentId)
+	seo := map[string]string{
 		"title":       doc.DocumentName + " - 《" + bookResult.BookName + "》",
 		"keywords":    bookResult.Label,
-		"description": bookResult.Description,
-	})
+		"description": beego.Substr(bodyText+" "+bookResult.Description, 0, 200),
+	}
+
+	if len(parentTitle) > 0 {
+		seo["title"] = parentTitle + " - " + doc.DocumentName + " - 《" + bookResult.BookName + "》"
+	}
+
+	//SEO
+	this.GetSeoByPage("book_read", seo)
 
 	existBookmark := new(models.Bookmark).Exist(this.Member.MemberId, doc.DocumentId)
+
+	doc.Vcnt = doc.Vcnt + 1
+
 	if this.IsAjax() {
 		var data struct {
 			Id        int    `json:"doc_id"`
@@ -281,7 +303,7 @@ func (this *DocumentController) Read() {
 
 	if err != nil {
 		beego.Error(err)
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	// 查询用户哪些文档阅读了
@@ -306,6 +328,12 @@ func (this *DocumentController) Read() {
 		}
 	}
 
+	if beego.AppConfig.DefaultBool("showWechatCode", false) && bookResult.PrivatelyOwned == 0 {
+		wechatCode := models.NewWechatCode()
+		go wechatCode.CreateWechatCode(bookResult.BookId) //如果已经生成了小程序码，则不会再生成
+		this.Data["Wxacode"] = wechatCode.GetCode(bookResult.BookId)
+	}
+
 	if wd := this.GetString("wd"); strings.TrimSpace(wd) != "" {
 		this.Data["Keywords"] = models.NewElasticSearchClient().SegWords(wd)
 	}
@@ -318,11 +346,11 @@ func (this *DocumentController) Read() {
 	this.Data["Content"] = template.HTML(doc.Release)
 	this.Data["View"] = doc.Vcnt
 	this.Data["UpdatedAt"] = doc.ModifyTime.Format("2006-01-02 15:04:05")
-
 }
 
 //编辑文档.
 func (this *DocumentController) Edit() {
+	docId := 0 // 文档id
 
 	identify := this.Ctx.Input.Param(":key")
 	if identify == "" {
@@ -343,7 +371,7 @@ func (this *DocumentController) Edit() {
 		bookResult, err = models.NewBookResult().FindByIdentify(identify, this.Member.MemberId)
 		if err != nil {
 			beego.Error("DocumentController.Edit => ", err)
-			this.Abort("403")
+			this.Abort("404")
 		}
 
 		if bookResult.RoleId == conf.BookObserver {
@@ -361,7 +389,18 @@ func (this *DocumentController) Edit() {
 
 	this.Data["Result"] = template.JS("[]")
 
-	trees, err := models.NewDocument().FindDocumentTree(bookResult.BookId, true)
+	// 编辑的文档
+	if id := this.GetString(":id"); id != "" {
+		if num, _ := strconv.Atoi(id); num > 0 {
+			docId = num
+		} else { //字符串
+			var doc = models.NewDocument()
+			orm.NewOrm().QueryTable(doc).Filter("identify", id).Filter("book_id", bookResult.BookId).One(doc, "document_id")
+			docId = doc.DocumentId
+		}
+	}
+
+	trees, err := models.NewDocument().FindDocumentTree(bookResult.BookId, docId, true)
 	if err != nil {
 		beego.Error("FindDocumentTree => ", err)
 	} else {
@@ -374,6 +413,7 @@ func (this *DocumentController) Edit() {
 		}
 	}
 	this.Data["BaiDuMapKey"] = beego.AppConfig.DefaultString("baidumapkey", "")
+
 }
 
 //创建一个文档.
@@ -698,7 +738,7 @@ func (this *DocumentController) DownloadAttachment() {
 		if this.Member == nil || this.Member.Role != conf.MemberSuperRole {
 			//如果项目是私有的，并且token不正确
 			if (book.PrivatelyOwned == 1 && token == "") || (book.PrivatelyOwned == 1 && book.PrivateToken != token) {
-				this.Abort("403")
+				this.Abort("404")
 			}
 		}
 
@@ -714,7 +754,7 @@ func (this *DocumentController) DownloadAttachment() {
 		if err == orm.ErrNoRows {
 			this.Abort("404")
 		} else {
-			this.Abort("500")
+			this.Abort("404")
 		}
 	}
 	if attachment.BookId != bookId {
@@ -1036,35 +1076,31 @@ func (this *DocumentController) Export() {
 	if identify == "" {
 		this.JsonResult(1, "下载失败，无法识别您要下载的文档")
 	}
-	if book, err := new(models.Book).FindByIdentify(identify); err == nil {
-		if book.PrivatelyOwned == 1 && this.Member.MemberId != book.MemberId {
-			this.JsonResult(1, "私有文档，禁止导出")
-		} else {
-			//查询文档是否存在
-			obj := fmt.Sprintf("projects/%v/books/%v%v", book.Identify, book.GenerateTime.Unix(), ext)
-			switch utils.StoreType {
-			case utils.StoreOss:
-				if err := store.ModelStoreOss.IsObjectExist(obj); err != nil {
-					beego.Error(err, obj)
-					this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
-				} else {
-					this.JsonResult(0, "获取文档下载链接成功", map[string]interface{}{"url": this.OssDomain + "/" + obj})
-				}
-			case utils.StoreLocal:
-				obj = "uploads/" + obj
-				if err := store.ModelStoreLocal.IsObjectExist(obj); err != nil {
-					beego.Error(err, obj)
-					this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
-				} else {
-					this.JsonResult(0, "获取文档下载链接成功", map[string]interface{}{"url": "/" + obj})
-				}
-			}
-
-		}
-	} else {
+	book, err := new(models.Book).FindByIdentify(identify)
+	if err != nil {
 		beego.Error(err.Error())
 	}
-
+	if book.PrivatelyOwned == 1 && this.Member.MemberId != book.MemberId {
+		this.JsonResult(1, "私有文档，只有文档创建人可导出")
+	}
+	//查询文档是否存在
+	obj := fmt.Sprintf("projects/%v/books/%v%v", book.Identify, book.GenerateTime.Unix(), ext)
+	switch utils.StoreType {
+	case utils.StoreOss:
+		if err := store.ModelStoreOss.IsObjectExist(obj); err != nil {
+			beego.Error(err, obj)
+			this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
+		}
+		this.JsonResult(0, "获取文档下载链接成功", map[string]interface{}{"url": this.OssDomain + "/" + obj})
+	case utils.StoreLocal:
+		obj = "uploads/" + obj
+		if err := store.ModelStoreLocal.IsObjectExist(obj); err != nil {
+			beego.Error(err, obj)
+			this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
+		}
+		this.JsonResult(0, "获取文档下载链接成功", map[string]interface{}{"url": "/" + obj})
+	}
+	this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
 }
 
 //生成项目访问的二维码.
@@ -1083,13 +1119,13 @@ func (this *DocumentController) QrCode() {
 	code, err := qr.Encode(uri, qr.L, qr.Unicode)
 	if err != nil {
 		beego.Error(err)
-		this.Abort("500")
+		this.Abort("404")
 	}
 	code, err = barcode.Scale(code, 150, 150)
 
 	if err != nil {
 		beego.Error(err)
-		this.Abort("500")
+		this.Abort("404")
 	}
 	this.Ctx.ResponseWriter.Header().Set("Content-Type", "image/png")
 
@@ -1098,7 +1134,7 @@ func (this *DocumentController) QrCode() {
 	err = png.Encode(this.Ctx.ResponseWriter, code)
 	if err != nil {
 		beego.Error(err)
-		this.Abort("500")
+		this.Abort("404")
 	}
 }
 
@@ -1129,7 +1165,7 @@ func (this *DocumentController) Search() {
 		for _, item := range result.Hits.Hits {
 			ids = append(ids, item.Source.Id)
 		}
-		docs, err := models.NewDocumentSearchResult().GetDocsById(ids)
+		docs, err := models.NewDocumentSearchResult().GetDocsById(ids, true)
 		if err != nil {
 			beego.Error(err)
 		}
@@ -1341,7 +1377,7 @@ func (this *DocumentController) Compare() {
 		book, err := models.NewBook().FindByFieldFirst("identify", identify)
 		if err != nil {
 			beego.Error("DocumentController.Compare => ", err)
-			this.Abort("403")
+			this.Abort("404")
 			return
 		}
 		bookId = book.BookId
@@ -1351,7 +1387,7 @@ func (this *DocumentController) Compare() {
 
 		if err != nil || bookResult.RoleId == conf.BookObserver {
 			beego.Error("FindByIdentify => ", err)
-			this.Abort("403")
+			this.Abort("404")
 			return
 		}
 		bookId = bookResult.BookId
@@ -1392,14 +1428,14 @@ func RecursiveFun(parentId int, prefix, dpath string, this *DocumentController, 
 
 			if err != nil {
 				beego.Error(err)
-				this.Abort("500")
+				this.Abort("404")
 			}
 
 			html, err := this.ExecuteViewPathTemplate("document/export.html", map[string]interface{}{"Model": book, "Lists": item, "BaseUrl": this.BaseUrl()})
 			if err != nil {
 				f.Close()
 				beego.Error(err)
-				this.Abort("500")
+				this.Abort("404")
 			}
 
 			buf := bytes.NewReader([]byte(html))
@@ -1414,7 +1450,7 @@ func RecursiveFun(parentId int, prefix, dpath string, this *DocumentController, 
 			if err != nil {
 				f.Close()
 				beego.Error(err)
-				this.Abort("500")
+				this.Abort("404")
 			}
 			//html = strings.Replace(html, "<img src=\"/uploads", "<img src=\""+this.BaseUrl()+"/uploads", -1)
 

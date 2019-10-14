@@ -16,8 +16,6 @@ import (
 
 	"crypto/tls"
 
-	"strconv"
-
 	"errors"
 
 	"github.com/PuerkitoBio/goquery"
@@ -52,11 +50,11 @@ type Document struct {
 }
 
 // 多字段唯一键
-func (m *Document) TableUnique() [][]string {
-	return [][]string{
-		[]string{"BookId", "Identify"},
-	}
-}
+//func (m *Document) TableUnique() [][]string {
+//	return [][]string{
+//		[]string{"BookId", "Identify"},
+//	}
+//}
 
 // TableName 获取对应数据库表名.
 func (m *Document) TableName() string {
@@ -100,6 +98,7 @@ func (m *Document) InsertOrUpdate(cols ...string) (id int64, err error) {
 	o := orm.NewOrm()
 	id = int64(m.DocumentId)
 	m.ModifyTime = time.Now()
+	m.DocumentName = strings.TrimSpace(m.DocumentName)
 	if m.DocumentId > 0 { //文档id存在，则更新
 		_, err = o.Update(m, cols...)
 		return
@@ -205,6 +204,46 @@ func (m *Document) ReleaseContent(bookId int, baseUrl string) {
 			content.WriteString("</ul></div>")
 			item.Release += content.String()
 		}
+
+		// crawl image
+		if gq, err := goquery.NewDocumentFromReader(strings.NewReader(item.Release)); err == nil {
+			images := gq.Find("img")
+			if images.Length() > 0 {
+				md := ModelStore.GetFiledById(item.DocumentId, "markdown")
+				images.Each(func(i int, selection *goquery.Selection) {
+					if src, ok := selection.Attr("src"); ok {
+						lowerSrc := strings.ToLower(src)
+						if strings.HasPrefix(lowerSrc, "https://") || strings.HasPrefix(lowerSrc, "http://") {
+							tmpFile, err := utils.DownImage(src)
+							if err == nil {
+								defer os.Remove(tmpFile)
+								var newSrc string
+								switch utils.StoreType {
+								case utils.StoreLocal:
+									newSrc = "/uploads/projects/" + book.Identify + "/" + filepath.Base(tmpFile)
+									err = store.ModelStoreLocal.MoveToStore(tmpFile, strings.TrimPrefix(newSrc, "/"))
+								case utils.StoreOss:
+									newSrc = "projects/" + book.Identify + "/" + filepath.Base(tmpFile)
+									err = store.ModelStoreOss.MoveToOss(tmpFile, newSrc, true)
+									newSrc = "/" + newSrc
+								}
+								if err != nil {
+									beego.Error(err.Error())
+								}
+								selection.SetAttr("src", newSrc)
+								md = strings.Replace(md, src, newSrc, -1)
+
+							} else {
+								beego.Error(err.Error())
+							}
+						}
+					}
+				})
+				ModelStore.InsertOrUpdate(DocumentStore{DocumentId: item.DocumentId, Markdown: md}, "markdown")
+			}
+			item.Release, _ = gq.Find("body").Html()
+		}
+
 		_, err = o.Update(item, "release")
 		if err != nil {
 			beego.Error(fmt.Sprintf("发布失败 => %+v", item), err)
@@ -407,10 +446,16 @@ func (m *Document) GenerateBook(book *Book, baseUrl string) {
 	}
 }
 
-//根据项目ID查询文档列表.
-func (m *Document) FindListByBookId(bookId int) (docs []*Document, err error) {
-	o := orm.NewOrm()
-	_, err = o.QueryTable(m.TableNameWithPrefix()).Filter("book_id", bookId).OrderBy("order_sort").All(&docs)
+//根据项目ID查询文档列表(含文档内容).
+func (m *Document) FindListByBookId(bookId int, withoutContent ...bool) (docs []*Document, err error) {
+	q := orm.NewOrm().QueryTable(m.TableNameWithPrefix()).Filter("book_id", bookId).OrderBy("order_sort")
+	if len(withoutContent) > 0 && withoutContent[0] {
+		cols := []string{"document_id", "identify", "document_name", "book_id", "vcnt", "version",
+			"modify_time", "member_id", "create_time", "order_sort", "parent_id"}
+		_, err = q.All(&docs, cols...)
+	} else {
+		_, err = q.All(&docs)
+	}
 	return
 }
 
@@ -427,6 +472,12 @@ func (m *Document) GetMenuTop(bookId int) (docs []*Document, err error) {
 		}
 	}
 	return
+}
+
+func (m *Document) GetParentTitle(pid int) (title string) {
+	var d Document
+	orm.NewOrm().QueryTable(m).Filter("document_id", pid).One(&d, "document_id", "parent_id", "document_name")
+	return d.DocumentName
 }
 
 //自动生成下一级的内容
@@ -471,6 +522,12 @@ func (m *Document) BookStackCrawl(html, md string, bookId, uid int) (content, ma
 			return
 		}
 
+		// 截屏选择器
+		if screenshot := strings.TrimSpace(gq.Find("screenshot").Text()); screenshot != "" {
+			utils.ScreenShotProjects.Store(project, screenshot)
+			defer utils.DeleteScreenShot(project)
+		}
+
 		//排除的选择器
 		var exclude []string
 		if excludeStr := strings.TrimSpace(gq.Find("exclude").Text()); excludeStr != "" {
@@ -485,18 +542,13 @@ func (m *Document) BookStackCrawl(html, md string, bookId, uid int) (content, ma
 		gq.Find("a").Each(func(i int, selection *goquery.Selection) {
 			if href, ok := selection.Attr("href"); ok {
 				if !strings.HasPrefix(href, "$") {
-					identify := strconv.Itoa(i) + ".md"
+					hrefTrim := strings.TrimRight(href, "/")
+					identify := utils.MD5Sub16(hrefTrim) + ".md"
+					links[hrefTrim] = identify
 					links[href] = identify
 				}
 			}
 		})
-
-		replaceMD := func(mdCont string, links map[string]string) string {
-			for link, identify := range links {
-				mdCont = strings.Replace(mdCont, "("+link+")", "($"+identify+")", -1)
-			}
-			return mdCont
-		}
 
 		gq.Find("a").Each(func(i int, selection *goquery.Selection) {
 			if href, ok := selection.Attr("href"); ok {
@@ -504,9 +556,9 @@ func (m *Document) BookStackCrawl(html, md string, bookId, uid int) (content, ma
 				//以http或者https开头
 				if strings.HasPrefix(hrefLower, "http://") || strings.HasPrefix(hrefLower, "https://") {
 					//采集文章内容成功，创建文档，填充内容，替换链接为标识
-					if retMD, err := utils.CrawlHtml2Markdown(href, 0, CrawlByChrome, 2, selector, exclude, map[string]string{"project": project}); err == nil {
+					if retMD, err := utils.CrawlHtml2Markdown(href, 0, CrawlByChrome, 2, selector, exclude, links, map[string]string{"project": project}); err == nil {
 						var doc Document
-						identify := strconv.Itoa(i) + ".md"
+						identify := utils.MD5Sub16(strings.TrimRight(href, "/")) + ".md"
 						doc.Identify = identify
 						doc.BookId = bookId
 						doc.Version = time.Now().Unix()
@@ -519,8 +571,7 @@ func (m *Document) BookStackCrawl(html, md string, bookId, uid int) (content, ma
 						} else {
 							var ds DocumentStore
 							ds.DocumentId = int(docId)
-							//ds.Markdown = "[TOC]\n\r\n\r" + retMD
-							ds.Markdown = "[TOC]\n\r\n\r" + replaceMD(retMD, links)
+							ds.Markdown = "[TOC]\n\r\n\r" + retMD
 							if err := new(DocumentStore).InsertOrUpdate(ds, "markdown", "content"); err != nil {
 								beego.Error(err)
 							}
@@ -562,8 +613,8 @@ func (m *Document) SplitMarkdownAndStore(seg string, markdown string, docId int)
 	seg = fmt.Sprintf("${%v}$", strings.Count(seg, "#"))
 	for i := 7; i > 0; i-- {
 		slice := make([]string, i+1)
-		k := strings.Join(slice, "#")
-		markdown = strings.Replace(markdown, k, fmt.Sprintf("${%v}$", i), -1)
+		k := "\n" + strings.Join(slice, "#")
+		markdown = strings.Replace(markdown, k, fmt.Sprintf("\n${%v}$", i), -1)
 	}
 	contSlice := strings.Split(markdown, seg)
 
@@ -590,6 +641,10 @@ func (m *Document) SplitMarkdownAndStore(seg string, markdown string, docId int)
 		doc.DocumentName = utils.ParseTitleFromMdHtml(mdtil.Md2html(val))
 		doc.Version = time.Now().Unix()
 		doc.MemberId = m.MemberId
+
+		if !strings.Contains(doc.Markdown, "[TOC]") {
+			doc.Markdown = "[TOC]\r\n" + doc.Markdown
+		}
 
 		if docId, err := doc.InsertOrUpdate(); err != nil {
 			beego.Error("InsertOrUpdate => ", err)

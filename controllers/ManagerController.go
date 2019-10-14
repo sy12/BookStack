@@ -32,7 +32,7 @@ type ManagerController struct {
 func (this *ManagerController) Prepare() {
 	this.BaseController.Prepare()
 	if !this.Member.IsAdministrator() {
-		this.Abort("403")
+		this.Abort("404")
 	}
 }
 
@@ -51,6 +51,11 @@ func (this *ManagerController) Index() {
 func (this *ManagerController) Users() {
 	this.TplName = "manager/users.html"
 	this.Data["IsUsers"] = true
+	wd := this.GetString("wd")
+	role, err := this.GetInt("role")
+	if err != nil {
+		role = -1
+	}
 	pageIndex, _ := this.GetInt("page", 0)
 	this.GetSeoByPage("manage_users", map[string]string{
 		"title":       "用户管理 - " + this.Sitename,
@@ -58,7 +63,7 @@ func (this *ManagerController) Users() {
 		"description": this.Sitename + "专注于文档在线写作、协作、分享、阅读与托管，让每个人更方便地发布、分享和获得知识。",
 	})
 
-	members, totalCount, err := models.NewMember().FindToPager(pageIndex, conf.PageSize)
+	members, totalCount, err := models.NewMember().FindToPager(pageIndex, conf.PageSize, wd, role)
 
 	if err != nil {
 		this.Data["ErrorMessage"] = err.Error()
@@ -78,7 +83,8 @@ func (this *ManagerController) Users() {
 	} else {
 		this.Data["Result"] = template.JS(string(b))
 	}
-
+	this.Data["Role"] = role
+	this.Data["Wd"] = wd
 }
 
 // 添加用户.
@@ -177,7 +183,7 @@ func (this *ManagerController) ChangeMemberRole() {
 	if memberId <= 0 {
 		this.JsonResult(6001, "参数错误")
 	}
-	if role != conf.MemberAdminRole && role != conf.MemberGeneralRole {
+	if role != conf.MemberAdminRole && role != conf.MemberGeneralRole && role != conf.MemberEditorRole {
 		this.JsonResult(6001, "用户权限不正确")
 	}
 	member := models.NewMember()
@@ -298,7 +304,7 @@ func (this *ManagerController) Books() {
 
 	books, totalCount, err := models.NewBookResult().FindToPager(pageIndex, conf.PageSize, private)
 	if err != nil {
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	if totalCount > 0 {
@@ -328,7 +334,7 @@ func (this *ManagerController) EditBook() {
 
 	book, err := models.NewBook().FindByFieldFirst("identify", identify)
 	if err != nil {
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	if this.Ctx.Input.IsPost() {
@@ -337,6 +343,7 @@ func (this *ManagerController) EditBook() {
 		commentStatus := this.GetString("comment_status")
 		tag := strings.TrimSpace(this.GetString("label"))
 		orderIndex, _ := this.GetInt("order_index", 0)
+		pin, _ := this.GetInt("pin", 0)
 
 		if strings.Count(description, "") > 500 {
 			this.JsonResult(6004, "项目描述不能大于500字")
@@ -356,6 +363,7 @@ func (this *ManagerController) EditBook() {
 		book.CommentStatus = commentStatus
 		book.Label = tag
 		book.OrderIndex = orderIndex
+		book.Pin = pin
 
 		if err := book.Update(); err != nil {
 			this.JsonResult(6006, "保存失败")
@@ -400,7 +408,17 @@ func (this *ManagerController) DeleteBook() {
 		this.JsonResult(6001, "参数错误")
 	}
 
+	//用户密码
+	pwd := this.GetString("password")
+	if m, err := models.NewMember().Login(this.Member.Account, pwd); err != nil || m.MemberId == 0 {
+		this.JsonResult(1, "项目删除失败，您的登录密码不正确")
+	}
+
 	book := models.NewBook()
+	b, _ := book.Find(bookId)
+	if b.Identify != this.GetString("identify") {
+		this.JsonResult(1, "项目删除失败，您输入的文档标识不正确")
+	}
 	err := book.ThoroughDeleteBook(bookId)
 
 	if err == orm.ErrNoRows {
@@ -418,7 +436,7 @@ func (this *ManagerController) DeleteBook() {
 		}
 	}()
 
-	this.JsonResult(0, "ok")
+	this.JsonResult(0, "项目删除成功")
 }
 
 // CreateToken 创建访问来令牌.
@@ -457,7 +475,7 @@ func (this *ManagerController) Setting() {
 
 	options, err := models.NewOption().All()
 	if err != nil {
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	if this.Ctx.Input.IsPost() {
@@ -500,7 +518,7 @@ func (this *ManagerController) Transfer() {
 	}
 
 	if !this.Member.IsAdministrator() {
-		this.Abort("403")
+		this.Abort("404")
 	}
 
 	identify := this.GetString("identify")
@@ -529,30 +547,53 @@ func (this *ManagerController) Transfer() {
 }
 
 func (this *ManagerController) Comments() {
-	if !this.Member.IsAdministrator() {
-		this.Abort("403")
+	status := this.GetString("status", "0")
+	statusNum, _ := strconv.Atoi(status)
+	p, _ := this.GetInt("page", 1)
+	size, _ := this.GetInt("size", 10)
+	m := models.NewComments()
+	if status == "" {
+		this.Data["Comments"], _ = m.Comments(p, size, 0)
+	} else {
+		this.Data["Comments"], _ = m.Comments(p, size, 0, statusNum)
+	}
+	this.Data["IsComments"] = true
+	this.Data["Status"] = status
+	count, _ := m.Count(0, statusNum)
+	this.Data["Count"] = count
+	if count > 0 {
+		html := utils.GetPagerHtml(this.Ctx.Request.RequestURI, p, size, int(count))
+		this.Data["PageHtml"] = html
 	}
 	this.TplName = "manager/comments.html"
 }
 
-//DeleteComment 标记评论为已删除
+func (this *ManagerController) ClearComments() {
+	uid, _ := this.GetInt("uid")
+	if uid > 0 {
+		models.NewComments().ClearComments(uid)
+	}
+	this.JsonResult(0, "清除成功")
+}
+
 func (this *ManagerController) DeleteComment() {
-
-	commentId, _ := this.GetInt("comment_id", 0)
-	if commentId <= 0 {
-		this.JsonResult(6001, "参数错误")
+	id, _ := this.GetInt("id")
+	if id > 0 {
+		models.NewComments().DeleteComment(id)
 	}
+	this.JsonResult(0, "删除成功")
+}
 
-	comment := models.NewComment()
-	if _, err := comment.Find(commentId); err != nil {
-		this.JsonResult(6002, "评论不存在")
+func (this *ManagerController) SetCommentStatus() {
+	id, _ := this.GetInt("id")
+	status, _ := this.GetInt("value")
+	field := this.GetString("field")
+	if id > 0 && field == "status" {
+		if err := models.NewComments().SetCommentStatus(id, status); err != nil {
+			this.JsonResult(1, err.Error())
+		}
 	}
-
-	comment.Approved = 3
-	if err := comment.Update("approved"); err != nil {
-		this.JsonResult(6003, "删除评论失败")
-	}
-	this.JsonResult(0, "ok", comment)
+	this.JsonResult(0, "设置成功")
 }
 
 //设置项目私有状态.
@@ -572,7 +613,7 @@ func (this *ManagerController) PrivatelyOwned() {
 	}
 
 	if !this.Member.IsAdministrator() {
-		this.Abort("403")
+		this.Abort("404")
 	}
 
 	book, err := models.NewBook().FindByFieldFirst("identify", identify)
@@ -590,6 +631,7 @@ func (this *ManagerController) PrivatelyOwned() {
 	}
 
 	go func() {
+		models.CountCategory()
 		public := true
 		if state == 1 {
 			public = false
@@ -610,7 +652,7 @@ func (this *ManagerController) AttachList() {
 
 	attachList, totalCount, err := models.NewAttachment().FindToPager(pageIndex, conf.PageSize)
 	if err != nil {
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	if totalCount > 0 {
@@ -644,7 +686,7 @@ func (this *ManagerController) AttachDetailed() {
 		if err == orm.ErrNoRows {
 			this.Abort("404")
 		}
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	attach.FilePath = filepath.Join(commands.WorkingDirectory, attach.FilePath)
@@ -857,4 +899,110 @@ func (this *ManagerController) DelFriendlink() {
 func (this *ManagerController) RebuildAllIndex() {
 	go models.NewElasticSearchClient().RebuildAllIndex()
 	this.JsonResult(0, "提交成功，请耐心等待")
+}
+
+func (this *ManagerController) Banners() {
+	this.Data["SeoTitle"] = "横幅管理"
+	this.TplName = "manager/banners.html"
+	this.Data["Banners"], _ = models.NewBanner().All()
+	this.Data["IsBanner"] = true
+}
+
+func (this *ManagerController) DeleteBanner() {
+	id, _ := this.GetInt("id")
+	if id > 0 {
+		err := models.NewBanner().Delete(id)
+		if err != nil {
+			this.JsonResult(1, err.Error())
+		}
+	}
+	this.JsonResult(0, "删除成功")
+}
+
+func (this *ManagerController) UpdateBanner() {
+	id, _ := this.GetInt("id")
+	field := this.GetString("field")
+	value := this.GetString("value")
+	if id > 0 {
+		err := models.NewBanner().Update(id, field, value)
+		if err != nil {
+			this.JsonResult(1, err.Error())
+		}
+	}
+	this.JsonResult(0, "更新成功")
+}
+
+func (this *ManagerController) UploadBanner() {
+	f, h, err := this.GetFile("image")
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	ext := strings.ToLower(filepath.Ext(strings.ToLower(h.Filename)))
+	tmpFile := fmt.Sprintf("uploads/tmp/banner-%v-%v%v", this.Member.MemberId, time.Now().Unix(), ext)
+	destFile := fmt.Sprintf("uploads/banners/%v.%v%v", this.Member.MemberId, time.Now().Unix(), ext)
+	defer func() {
+		f.Close()
+		os.Remove(tmpFile)
+		if err != nil {
+			utils.DeleteFile(destFile)
+		}
+	}()
+
+	os.MkdirAll(filepath.Dir(tmpFile), os.ModePerm)
+	err = this.SaveToFile("image", tmpFile)
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	err = utils.UploadFile(tmpFile, destFile)
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	banner := &models.Banner{
+		Image:     "/" + destFile,
+		Type:      this.GetString("type"),
+		Title:     this.GetString("title"),
+		Link:      this.GetString("link"),
+		Status:    true,
+		CreatedAt: time.Now(),
+	}
+	banner.Sort, _ = this.GetInt("sort")
+	_, err = orm.NewOrm().Insert(banner)
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	this.JsonResult(0, "横幅上传成功")
+}
+
+func (this *ManagerController) SubmitBook() {
+	this.TplName = "manager/submit_book.html"
+	m := models.NewSubmitBooks()
+	page, _ := this.GetInt("page", 1)
+	size, _ := this.GetInt("size", 100)
+	books, total, _ := m.Lists(page, size)
+	if total > 0 {
+		this.Data["PageHtml"] = utils.NewPaginations(conf.RollPage, int(total), size, page, beego.URLFor("ManagerController.SubmitBook"), "")
+	} else {
+		this.Data["PageHtml"] = ""
+	}
+	this.Data["Books"] = books
+	this.Data["IsSubmitBook"] = true
+}
+
+func (this *ManagerController) DeleteSubmitBook() {
+	id, _ := this.GetInt("id")
+	orm.NewOrm().QueryTable(models.NewSubmitBooks()).Filter("id", id).Delete()
+	this.JsonResult(0, "删除成功")
+}
+
+func (this *ManagerController) UpdateSubmitBook() {
+	field := this.GetString("field")
+	value := this.GetString("value")
+	id, _ := this.GetInt("id")
+	if id > 0 {
+		_, err := orm.NewOrm().QueryTable(models.NewSubmitBooks()).Filter("id", id).Update(orm.Params{field: value})
+		if err != nil {
+			this.JsonResult(1, err.Error())
+		}
+	}
+	this.JsonResult(0, "更新成功")
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/ioutil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +27,7 @@ import (
 	"github.com/TruthHun/gotil/mdtil"
 	"github.com/TruthHun/gotil/util"
 	"github.com/TruthHun/gotil/ziptil"
+	"github.com/TruthHun/html2md"
 	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/logs"
 	"github.com/astaxie/beego/orm"
@@ -67,7 +69,7 @@ func (this *BookController) Index() {
 	books, totalCount, err := models.NewBook().FindToPager(pageIndex, conf.PageSize, this.Member.MemberId, private)
 	if err != nil {
 		logs.Error("BookController.Index => ", err)
-		this.Abort("500")
+		this.Abort("404")
 	}
 	if totalCount > 0 {
 		//this.Data["PageHtml"] = utils.GetPagerHtml(this.Ctx.Request.RequestURI, pageIndex, conf.PageSize, totalCount)
@@ -131,9 +133,9 @@ func (this *BookController) Dashboard() {
 	if err != nil {
 		beego.Error(err)
 		if err == models.ErrPermissionDenied {
-			this.Abort("403")
+			this.Abort("404")
 		}
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	this.Data["Model"] = *book
@@ -157,14 +159,14 @@ func (this *BookController) Setting() {
 		}
 
 		if err == models.ErrPermissionDenied {
-			this.Abort("403")
+			this.Abort("404")
 		}
 		this.Abort("404")
 	}
 
 	//如果不是创始人也不是管理员则不能操作
 	if book.RoleId != conf.BookFounder && book.RoleId != conf.BookAdmin {
-		this.Abort("403")
+		this.Abort("404")
 	}
 
 	if book.PrivateToken != "" {
@@ -228,6 +230,7 @@ func (this *BookController) SaveBook() {
 	book.Editor = editor
 	book.Author = this.GetString("author")
 	book.AuthorURL = this.GetString("author_url")
+	book.Lang = this.GetString("lang")
 
 	if err := book.Update(); err != nil {
 		this.JsonResult(6006, "保存失败")
@@ -254,7 +257,7 @@ func (this *BookController) SaveBook() {
 		}
 		client := models.NewElasticSearchClient()
 		if errSearch := client.BuildIndex(es); errSearch != nil && client.On {
-			beego.Error(err.Error())
+			beego.Error(errSearch.Error())
 		}
 	}()
 
@@ -293,6 +296,8 @@ func (this *BookController) PrivatelyOwned() {
 		this.JsonResult(6004, "保存失败")
 	}
 	go func() {
+		models.CountCategory()
+
 		public := true
 		if state == 1 {
 			public = false
@@ -473,9 +478,9 @@ func (this *BookController) Users() {
 	book, err := models.NewBookResult().FindByIdentify(key, this.Member.MemberId)
 	if err != nil {
 		if err == models.ErrPermissionDenied {
-			this.Abort("403")
+			this.Abort("404")
 		}
-		this.Abort("500")
+		this.Abort("404")
 	}
 
 	this.Data["Model"] = *book
@@ -505,6 +510,11 @@ func (this *BookController) Users() {
 
 // Create 创建项目.
 func (this *BookController) Create() {
+	if opt, err := models.NewOption().FindByKey("ALL_CAN_WRITE_BOOK"); err == nil {
+		if opt.OptionValue == "false" && this.Member.Role == conf.MemberGeneralRole { // 读者无权限创建项目
+			this.JsonResult(1, "普通读者无法创建项目，如需创建项目，请向管理员申请成为作者")
+		}
+	}
 
 	bookName := strings.TrimSpace(this.GetString("book_name", ""))
 	identify := strings.TrimSpace(this.GetString("identify", ""))
@@ -756,7 +766,7 @@ func (this *BookController) SaveSort() {
 		bookResult, err := models.NewBookResult().FindByIdentify(identify, this.Member.MemberId)
 		if err != nil {
 			beego.Error("DocumentController.Edit => ", err)
-			this.Abort("403")
+			this.Abort("404")
 		}
 
 		if bookResult.RoleId == conf.BookObserver {
@@ -910,8 +920,8 @@ func (this *BookController) UploadProject() {
 		this.JsonResult(1, err.Error())
 	}
 	defer f.Close()
-	if strings.ToLower(filepath.Ext(h.Filename)) != ".zip" {
-		this.JsonResult(1, "请上传zip格式文件")
+	if strings.ToLower(filepath.Ext(h.Filename)) != ".zip" && strings.ToLower(filepath.Ext(h.Filename)) != ".epub" {
+		this.JsonResult(1, "请上传指定格式文件")
 	}
 	tmpFile := "store/" + identify + ".zip" //保存的文件名
 	if err := this.SaveToFile("zipfile", tmpFile); err == nil {
@@ -977,22 +987,46 @@ func (this *BookController) unzipToData(bookId int, identify, zipFile, originFil
 								beego.Error(err)
 							}
 						}
-					} else if ext == ".md" || ext == ".markdown" { //markdown文档，提取文档内容，录入数据库
+					} else if ext == ".md" || ext == ".markdown" || ext == ".html" { //markdown文档，提取文档内容，录入数据库
 						doc := new(models.Document)
+						var mdcont string
+						var htmlStr string
 						if b, err := ioutil.ReadFile(file.Path); err == nil {
-							mdcont := strings.TrimSpace(string(b))
+
+							if ext == ".md" || ext == ".markdown" {
+								mdcont = strings.TrimSpace(string(b))
+
+								htmlStr = mdtil.Md2html(mdcont)
+							} else {
+								htmlStr = string(b)
+								mdcont = html2md.Convert(htmlStr)
+							}
 							if !strings.HasPrefix(mdcont, "[TOC]") {
 								mdcont = "[TOC]\r\n\r\n" + mdcont
 							}
-							htmlStr := mdtil.Md2html(mdcont)
 							doc.DocumentName = utils.ParseTitleFromMdHtml(htmlStr)
 							doc.BookId = bookId
 							//文档标识
 							doc.Identify = strings.Replace(strings.Trim(strings.TrimPrefix(file.Path, projectRoot), "/"), "/", "-", -1)
+							doc.Identify = strings.Replace(doc.Identify, ")", "", -1)
+
 							doc.MemberId = this.Member.MemberId
 							doc.OrderSort = 1
 							if strings.HasSuffix(strings.ToLower(file.Name), "summary.md") {
 								doc.OrderSort = 0
+							}
+							if strings.HasSuffix(strings.ToLower(file.Name), "summary.html") {
+								mdcont += "<bookstack-summary></bookstack-summary>"
+								// 生成带$的文档标识，阅读BaseController.go代码可知，
+								// 要使用summary.md的排序功能，必须在链接中带上符号$
+								mdcont = strings.Replace(mdcont, "](", "]($", -1)
+
+								// 去掉可能存在的url编码的右括号，否则在url译码后会与markdown语法混淆
+								mdcont = strings.Replace(mdcont, "%29", "", -1)
+								mdcont, _ = url.QueryUnescape(mdcont)
+
+								doc.OrderSort = 0
+								doc.Identify = "summary.md"
 							}
 							if docId, err := doc.InsertOrUpdate(); err == nil {
 								if err := ModelStore.InsertOrUpdate(models.DocumentStore{
@@ -1075,7 +1109,8 @@ func (this *BookController) loadByFolder(bookId int, identify, folder string) {
 						if err := ModelStore.InsertOrUpdate(models.DocumentStore{
 							DocumentId: int(docId),
 							Markdown:   mdCont,
-						}, "markdown"); err != nil {
+							Content:    "",
+						}, "markdown", "content"); err != nil {
 							beego.Error(err)
 						}
 					} else {
@@ -1127,7 +1162,7 @@ func (this *BookController) replaceToAbs(projectRoot string, identify string) {
 			basePathSlice := strings.Split(basePath, "/")
 			l := len(basePathSlice)
 			b, _ := ioutil.ReadFile(file.Path)
-			output := blackfriday.MarkdownCommon(b)
+			output := blackfriday.Run(b)
 			doc, _ := goquery.NewDocumentFromReader(strings.NewReader(string(output)))
 
 			//图片链接处理
@@ -1189,8 +1224,8 @@ func (this *BookController) Comment() {
 		this.JsonResult(1, "请先登录在评论")
 	}
 	content := this.GetString("content")
-	if l := len(content); l < 5 || l > 512 {
-		this.JsonResult(1, "评论内容先5-512个字符")
+	if l := len(content); l < 5 || l > 256 {
+		this.JsonResult(1, "评论内容限 5 - 256 个字符")
 	}
 	bookId, _ := this.GetInt(":id")
 	if bookId > 0 {

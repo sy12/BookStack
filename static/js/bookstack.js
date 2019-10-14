@@ -41,6 +41,7 @@ function load_doc(url,wd,without_history) {
             $("#article-title").text(doc_title);
 
             $(".bookmark-action").attr("data-docid",res.data.doc_id);
+            $(".btn-edit").attr("href",$(".btn-edit").attr("data-url")+res.data.doc_id);
             if (res.data.bookmark){//已添加书签
                 $(".bookmark-action .bookmark-add").addClass("hide");
                 $(".bookmark-action .bookmark-remove").removeClass("hide");
@@ -138,9 +139,21 @@ $(function () {
         }else{
             $(".view-backtop").removeClass("active");
         }
+
+        var links = $(".reference-link"),l = links.length,find=false;
+        for (var i = 0; i < l && find==false; i++) {
+            if($(links[i]).offset().top>0){
+                $(".markdown-toc a").removeClass("active");
+                $(".markdown-toc a[href='#"+$(links[i]).attr("name")+"']").addClass("active");
+                find=true;
+            }
+        }
+
+
+
     });
 
-    $(".manual-mode-view .manual-left a").click(function () {
+    $(".manual-left").on("click","a",function () {
         if($(".manual-mode-view").hasClass("manual-mobile-show-left")){
             $(".manual-mask").trigger("click");
         }

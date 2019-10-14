@@ -16,7 +16,7 @@ const RegexpEmail = `^(\w)+(\.\w+)*@(\w)+((\.\w+)+)$`
 
 //允许用户名中出现点号
 
-const RegexpAccount = `^[a-zA-Z][a-zA-z0-9\.]{2,50}$`
+const RegexpAccount = `[a-zA-z0-9]{2,50}$`
 
 // PageSize 默认分页条数.
 const PageSize = 10
@@ -27,10 +27,12 @@ const RollPage = 4
 const (
 	// 超级管理员.
 	MemberSuperRole = 0
-	//普通管理员.
+	// 普通管理员.
 	MemberAdminRole = 1
-	//普通用户.
+	// 读者.
 	MemberGeneralRole = 2
+	// 作者（可以创建项目）
+	MemberEditorRole = 3
 )
 
 const (
@@ -50,6 +52,7 @@ const (
 	LoggerException = "exception"
 	LoggerDocument  = "document"
 )
+
 const (
 	//本地账户校验
 	AuthMethodLocal = "local"

@@ -22,7 +22,7 @@ type Member struct {
 	MemberId      int       `orm:"pk;auto;column(member_id)" json:"member_id"`
 	Account       string    `orm:"size(30);unique;column(account)" json:"account"`
 	Nickname      string    `orm:"size(30);unique;column(nickname)" json:"nickname"` //昵称
-	Password      string    `orm:"column(password)" json:"-"`
+	Password      string    `orm:"column(password);size(512)" json:"-"`
 	AuthMethod    string    `orm:"column(auth_method);default(local);size(50);" json:"auth_method"` //认证方式: local 本地数据库 /ldap LDAP
 	Description   string    `orm:"column(description);size(2000)" json:"description"`
 	Email         string    `orm:"size(100);column(email);unique" json:"email"`
@@ -156,11 +156,11 @@ func (m *Member) Add() error {
 	if ok, err := regexp.MatchString(conf.RegexpEmail, m.Email); !ok || err != nil || m.Email == "" {
 		return errors.New("邮箱格式不正确")
 	}
-	if m.AuthMethod == "local" {
-		if l := strings.Count(m.Password, ""); l < 6 || l >= 50 {
-			return errors.New("密码不能为空且必须在6-50个字符之间")
-		}
+
+	if l := strings.Count(m.Password, ""); l < 7 || l >= 50 {
+		return errors.New("密码不能为空且必须在6-50个字符之间")
 	}
+
 	cond := orm.NewCondition().Or("email", m.Email).Or("nickname", m.Nickname).Or("account", m.Account)
 	var one Member
 	if o.QueryTable(m.TableNameWithPrefix()).SetCond(cond).One(&one, "member_id", "nickname", "account", "email"); one.MemberId > 0 {
@@ -174,9 +174,13 @@ func (m *Member) Add() error {
 			return errors.New("用户名已存在，请更换用户名")
 		}
 	}
-	//if c, err := o.QueryTable(m.TableNameWithPrefix()).Filter("email", m.Email).Count(); err == nil && c > 0 {
-	//	return errors.New("邮箱已被使用")
-	//}
+
+	// 这里必需设置为读者，避免采坑：普通用户注册的时候注册成了管理员...
+	if m.Account == "admin" {
+		m.Role = conf.MemberSuperRole
+	} else {
+		m.Role = conf.MemberGeneralRole
+	}
 
 	hash, err := utils.PasswordHash(m.Password)
 
@@ -221,12 +225,15 @@ func (m *Member) Find(id int) (*Member, error) {
 }
 
 func (m *Member) ResolveRoleName() {
-	if m.Role == conf.MemberSuperRole {
+	switch m.Role {
+	case conf.MemberSuperRole:
 		m.RoleName = "超级管理员"
-	} else if m.Role == conf.MemberAdminRole {
+	case conf.MemberAdminRole:
 		m.RoleName = "管理员"
-	} else if m.Role == conf.MemberGeneralRole {
-		m.RoleName = "普通用户"
+	case conf.MemberGeneralRole:
+		m.RoleName = "读者"
+	case conf.MemberEditorRole:
+		m.RoleName = "作者"
 	}
 }
 
@@ -243,20 +250,33 @@ func (m *Member) FindByAccount(account string) (*Member, error) {
 }
 
 //分页查找用户.
-func (m *Member) FindToPager(pageIndex, pageSize int) ([]*Member, int64, error) {
+func (m *Member) FindToPager(pageIndex, pageSize int, wd string, role ...int) ([]*Member, int64, error) {
 	o := orm.NewOrm()
 
 	var members []*Member
 
 	offset := (pageIndex - 1) * pageSize
+	q := o.QueryTable(m.TableNameWithPrefix())
+	cond := orm.NewCondition()
 
-	totalCount, err := o.QueryTable(m.TableNameWithPrefix()).Count()
+	if len(role) > 0 && role[0] != -1 {
+		cond = cond.And("role", role[0])
+	}
+
+	if wd != "" {
+		cond = cond.AndCond(orm.NewCondition().Or("account__icontains", wd).Or("nickname__icontains", wd).Or("email__icontains", wd))
+	}
+	if !cond.IsEmpty() {
+		q = q.SetCond(cond)
+	}
+
+	totalCount, err := q.Count()
 
 	if err != nil {
 		return members, 0, err
 	}
 
-	_, err = o.QueryTable(m.TableNameWithPrefix()).OrderBy("-member_id").Offset(offset).Limit(pageSize).All(&members)
+	_, err = q.OrderBy("-member_id").Offset(offset).Limit(pageSize).All(&members)
 
 	if err != nil {
 		return members, 0, err
@@ -460,8 +480,13 @@ func (m *Member) GetQrcodeByUid(uid interface{}) (qrcode map[string]string) {
 	return qrcode
 }
 
-//根据用户名获取用户信息
+// 获取用户信息，根据用户名或邮箱
 func (this *Member) GetByUsername(username string) (member Member, err error) {
-	err = orm.NewOrm().QueryTable("md_members").Filter("account", username).One(&member)
+	q := orm.NewOrm().QueryTable("md_members")
+	if strings.Contains(username, "@") { //存在 @ 符号的表示邮箱，因为用户名只有数字和字母
+		err = q.Filter("email", username).One(&member)
+	} else {
+		err = q.Filter("account", username).One(&member)
+	}
 	return
 }

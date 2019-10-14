@@ -28,11 +28,12 @@ var IsRebuildAllIndex = false
 
 //全文搜索客户端
 type ElasticSearchClient struct {
-	Host    string        //host
-	Index   string        //索引
-	Type    string        //type
-	On      bool          //是否启用全文搜索
-	Timeout time.Duration //超时时间
+	Host           string        //host
+	Index          string        //索引
+	Type           string        //type
+	On             bool          //是否启用全文搜索
+	Timeout        time.Duration //超时时间
+	IsRelateSearch bool
 }
 
 //全文搜索
@@ -197,6 +198,7 @@ func (this *ElasticSearchClient) Search(wd string, p, listRows int, isSearchDoc 
 	}
 
 	var queryBody string
+
 	// 请求体
 	if bid > 0 { // 搜索指定书籍的文档，不限私有和公有
 		queryBody = `{"query": {"bool": {"filter": [{
@@ -204,39 +206,87 @@ func (this *ElasticSearchClient) Search(wd string, p, listRows int, isSearchDoc 
 					"book_id": {$bookId}
 				}
 			}],
-          "must":{"multi_match" : {
-              "query":    "%v", 
-              "fields": [ "title", "keywords","content" ] 
-            }
-          }
+	    "must":{"multi_match" : {
+	        "query":    "%v",
+            "minimum_should_match": "%v",
+	        "fields": [ "title", "keywords","content" ]
+	      }
+	    }
 		}},"from": %v,"size": %v,"_source":["id"]}`
 		queryBody = strings.Replace(queryBody, "{$bookId}", strconv.Itoa(bid), 1)
 	} else {
 		if isSearchDoc { //搜索公开的文档
 			queryBody = `{"query": {"bool": {
 			"filter": [
-              {"range": {"book_id": {"gt": 0}}},
-              {"term": {"private": 0}}
-            ],"must":{
-          	"multi_match" : {
-              "query":    "%v", 
-              "fields": [ "title", "keywords","content" ] 
-            }}}},"from": %v,"size": %v,"_source":["id"]}`
+	        {"range": {"book_id": {"gt": 0}}},
+	        {"term": {"private": 0}}
+	      ],"must":{
+	    	"multi_match" : {
+	        "query":    "%v",
+			"minimum_should_match": "%v",
+	        "fields": [ "title", "keywords","content" ]
+	      }}}},"from": %v,"size": %v,"_source":["id"]}`
 		} else { //搜索公开的书籍
 			queryBody = `{"query": {"bool": {
 			"filter": [
-            	{"term": {"book_id": 0}},
-                {"term": {"private": 0}}
-            ],"must":{
-          	"multi_match" : {
-              "query":    "%v", 
-              "fields": [ "title", "keywords","content" ] 
-            }
-          }}},"from": %v, "size": %v,"_source":["id"]}`
+	      	{"term": {"book_id": 0}},
+	          {"term": {"private": 0}}
+	      ],"must":{
+	    	"multi_match" : {
+	        "query":    "%v",
+			"minimum_should_match": "%v",
+	        "fields": [ "title", "keywords","content" ]
+	      }
+	    }}},"from": %v, "size": %v,"_source":["id"]}`
 		}
 	}
 
-	queryBody = fmt.Sprintf(queryBody, wd, (p-1)*listRows, listRows)
+	// 请求体
+	//if bid > 0 { // 搜索指定书籍的文档，不限私有和公有
+	//	queryBody = `{"query": {"bool": {"filter": [{
+	//			"term": {
+	//				"book_id": {$bookId}
+	//			}
+	//		}],
+	//     "must":{
+	//     	"query_string": {
+	//         "query": "%v",
+	//         "type": "phrase"
+	//       }
+	//     }
+	//	}},"from": %v,"size": %v,"_source":["id"]}`
+	//	queryBody = strings.Replace(queryBody, "{$bookId}", strconv.Itoa(bid), 1)
+	//} else {
+	//	if isSearchDoc { //搜索公开的文档
+	//		queryBody = `{"query": {"bool": {
+	//		"filter": [
+	//         {"range": {"book_id": {"gt": 0}}},
+	//         {"term": {"private": 0}}
+	//       ],"must":{
+	//     	"query_string": {
+	//         "query": "%v",
+	//         "type": "phrase"
+	//       }
+	//     }}},"from": %v,"size": %v,"_source":["id"]}`
+	//	} else { //搜索公开的书籍
+	//		queryBody = `{"query": {"bool": {
+	//		"filter": [
+	//       	{"term": {"book_id": 0}},
+	//           {"term": {"private": 0}}
+	//       ],"must":{
+	//     	"query_string": {
+	//         "query": "%v",
+	//         "type": "phrase"
+	//       }
+	//     }}},"from": %v, "size": %v,"_source":["id"]}`
+	//	}
+	//}
+
+	percent := GetOptionValue("SEARCH_ACCURACY", "50")
+	if this.IsRelateSearch {
+		percent = "10"
+	}
+	queryBody = fmt.Sprintf(queryBody, wd, percent+"%", (p-1)*listRows, listRows)
 	api := this.Host + this.Index + "/" + this.Type + "/_search"
 	if orm.Debug {
 		beego.Debug(api)
@@ -471,6 +521,9 @@ func (this *ElasticSearchClient) BuildIndex(es ElasticSearchData) (err error) {
 
 // 查询分词
 func (this *ElasticSearchClient) SegWords(keyword string) string {
+	if !this.On {
+		return keyword
+	}
 	api := this.Host + this.Index + "/_analyze"
 	req := this.post(api)
 	keyword = strings.Replace(keyword, "\\", " ", -1)

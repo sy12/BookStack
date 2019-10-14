@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/TruthHun/BookStack/utils"
+
 	"github.com/TruthHun/BookStack/commands"
 	"github.com/TruthHun/BookStack/commands/daemon"
 	_ "github.com/TruthHun/BookStack/routers"
@@ -12,7 +14,6 @@ import (
 )
 
 func main() {
-
 	if len(os.Args) >= 3 && os.Args[1] == "service" {
 		if os.Args[2] == "install" {
 			daemon.Install()
@@ -32,6 +33,7 @@ func main() {
 		fmt.Println("Create service error => ", err)
 		os.Exit(1)
 	}
-
+	utils.PrintInfo()
+	utils.InitVirtualRoot()
 	s.Run()
 }

@@ -3857,16 +3857,16 @@
   background: none;
 }
 .editormd-preview-container code, .editormd-html-preview code {
-  border: 1px solid #ddd;
+  border: 1px solid #F6F6F6;
   background-color: #f6f6f6;
   padding: 3px;
-  padding-top:6px;
+  padding-top:4px;
   border-radius: 3px;
   font-size: 14px;
   color: #c7254e;
 }
 .editormd-preview-container pre, .editormd-html-preview pre {
-  border: 1px solid #ddd;
+  border: 1px solid #f6f6f6;
   background: #f6f6f6;
   padding: 10px;
   -webkit-border-radius: 3px;
@@ -4050,7 +4050,7 @@ li.L9 {
 
 .editormd-preview-container pre.prettyprint, .editormd-html-preview pre.prettyprint {
   padding: 10px;
-  border: 1px solid #ddd;
+  border: 1px solid #F6F6F6;
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -4464,10 +4464,13 @@ li.L1, li.L3, li.L5, li.L7, li.L9{background-color: transparent;}
 
 
 .editormd-preview-container blockquote, .editormd-html-preview blockquote{
-  color: #2C3E50;font-style: normal !important;
+  color: #999 !important;font-style: normal !important;
   border-left: 5px solid #D6DBDF;
   font-size: 14px;
   background: none repeat scroll 0 0 rgba(102,128,153,.05);
   margin: 8px 0;
   padding: 8px 16px;
+}
+.editormd-preview-container pre code{
+  display: inline-block !important;
 }

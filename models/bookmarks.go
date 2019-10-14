@@ -21,13 +21,14 @@ type Bookmark struct {
 
 //书签列表
 type bookmarkList struct {
-	Id       int    `json:"id"`
-	Title    string `json:"title"`
-	Identify string `json:"identify"`
-	BookId   int    `json:"book_id"`
-	Uid      int    `json:"uid"`
-	DocId    int    `json:"doc_id"`
-	CreateAt int    `json:"create_at"`
+	Id           int       `json:"id,omitempty"`
+	Title        string    `json:"title"`
+	Identify     string    `json:"identify"`
+	BookId       int       `json:"book_id"`
+	Uid          int       `json:"uid"`
+	DocId        int       `json:"doc_id"`
+	CreateAt     int       `json:"-"`
+	CreateAtTime time.Time `json:"created_at"`
 }
 
 var tableBookmark = "md_bookmark"
@@ -37,6 +38,10 @@ func (m *Bookmark) TableUnique() [][]string {
 	return [][]string{
 		[]string{"Uid", "DocId"},
 	}
+}
+
+func NewBookmark() *Bookmark {
+	return &Bookmark{}
 }
 
 //添加或移除书签（如果书签不存在，则添加书签，如果书签存在，则移除书签）

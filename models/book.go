@@ -22,13 +22,15 @@ import (
 type BookOrder string
 
 const (
-	OrderRecommend BookOrder = "recommend"
-	OrderPopular   BookOrder = "popular"
-	OrderLatest    BookOrder = "latest"
-	OrderScore     BookOrder = "score"   //评分排序
-	OrderComment   BookOrder = "comment" //评论排序
-	OrderStar      BookOrder = "star"    //收藏排序
-	OrderView      BookOrder = "vcnt"    //浏览排序
+	OrderRecommend       BookOrder = "recommend"
+	OrderPopular         BookOrder = "popular"          //热门
+	OrderLatest          BookOrder = "latest"           //最新
+	OrderNew             BookOrder = "new"              //最新
+	OrderScore           BookOrder = "score"            //评分排序
+	OrderComment         BookOrder = "comment"          //评论排序
+	OrderStar            BookOrder = "star"             //收藏排序
+	OrderView            BookOrder = "vcnt"             //浏览排序
+	OrderLatestRecommend BookOrder = "latest-recommend" //最新推荐
 )
 
 // Book struct .
@@ -37,6 +39,7 @@ type Book struct {
 	BookName          string    `orm:"column(book_name);size(500)" json:"book_name"`      // BookName 项目名称.
 	Identify          string    `orm:"column(identify);size(100);unique" json:"identify"` // Identify 项目唯一标识.
 	OrderIndex        int       `orm:"column(order_index);type(int);default(0)" json:"order_index"`
+	Pin               int       `orm:"column(pin);type(int);default(0)" json:"pin"`       // pin值，用于首页固定显示
 	Description       string    `orm:"column(description);size(2000)" json:"description"` // Description 项目描述.
 	Label             string    `orm:"column(label);size(500)" json:"label"`
 	PrivatelyOwned    int       `orm:"column(privately_owned);type(int);default(0)" json:"privately_owned"` // PrivatelyOwned 项目私有： 0 公开/ 1 私有
@@ -50,18 +53,19 @@ type Book struct {
 	Theme             string    `orm:"column(theme);size(255);default(default)" json:"theme"`              //主题风格
 	CreateTime        time.Time `orm:"type(datetime);column(create_time);auto_now_add" json:"create_time"` // CreateTime 创建时间 .
 	MemberId          int       `orm:"column(member_id);size(100)" json:"member_id"`
-	ModifyTime        time.Time `orm:"type(datetime);column(modify_time);auto_now_add" json:"modify_time"`
+	ModifyTime        time.Time `orm:"type(datetime);column(modify_time);auto_now" json:"modify_time"`
 	ReleaseTime       time.Time `orm:"type(datetime);column(release_time);" json:"release_time"`   //项目发布时间，每次发布都更新一次，如果文档更新时间小于发布时间，则文档不再执行发布
 	GenerateTime      time.Time `orm:"type(datetime);column(generate_time);" json:"generate_time"` //下载文档生成时间
 	LastClickGenerate time.Time `orm:"type(datetime);column(last_click_generate)" json:"-"`        //上次点击上传文档的时间，用于显示频繁点击浪费服务器硬件资源的情况
 	Version           int64     `orm:"type(bigint);column(version);default(0)" json:"version"`
-	Vcnt              int       `orm:"column(vcnt);default(0)" json:"vcnt"`    //文档项目被阅读次数
-	Star              int       `orm:"column(star);default(0)" json:"star"`    //文档项目被收藏次数
-	Score             int       `orm:"column(score);default(40)" json:"score"` //文档项目评分，默认40，即4.0星
-	CntScore          int       //评分人数
-	CntComment        int       //评论人数
+	Vcnt              int       `orm:"column(vcnt);default(0)" json:"vcnt"`    // 文档项目被阅读次数
+	Star              int       `orm:"column(star);default(0)" json:"star"`    // 文档项目被收藏次数
+	Score             int       `orm:"column(score);default(40)" json:"score"` // 文档项目评分，默认40，即4.0星
+	CntScore          int       // 评分人数
+	CntComment        int       // 评论人数
 	Author            string    `orm:"size(50)"`           //原作者，即来源
 	AuthorURL         string    `orm:"column(author_url)"` //原作者链接，即来源链接
+	Lang              string    `orm:"size(10);index;default(zh)"`
 }
 
 // TableName 获取对应数据库表名.
@@ -118,12 +122,12 @@ func (m *Book) Insert() (err error) {
 	return err
 }
 
-func (m *Book) Find(id int) (book *Book, err error) {
+func (m *Book) Find(id int, cols ...string) (book *Book, err error) {
 	if id <= 0 {
 		return
 	}
 	o := orm.NewOrm()
-	err = o.QueryTable(m.TableNameWithPrefix()).Filter("book_id", id).One(m)
+	err = o.QueryTable(m.TableNameWithPrefix()).Filter("book_id", id).One(m, cols...)
 	return m, err
 }
 
@@ -159,10 +163,10 @@ func (m *Book) FindByFieldFirst(field string, value interface{}) (book *Book, er
 	return m, err
 }
 
-func (m *Book) FindByIdentify(identify string) (book *Book, err error) {
+func (m *Book) FindByIdentify(identify string, cols ...string) (book *Book, err error) {
 	o := orm.NewOrm()
 	book = &Book{}
-	err = o.QueryTable(m.TableNameWithPrefix()).Filter("identify", identify).One(book)
+	err = o.QueryTable(m.TableNameWithPrefix()).Filter("identify", identify).One(book, cols...)
 	return
 }
 
@@ -178,7 +182,6 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 	if len(PrivatelyOwned) > 0 {
 		sql1 = sql1 + " and book.privately_owned=" + strconv.Itoa(PrivatelyOwned[0])
 	}
-
 	err = o.Raw(sql1, memberId).QueryRow(&totalCount)
 	if err != nil {
 		return
@@ -186,15 +189,13 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 
 	offset := (pageIndex - 1) * pageSize
 	sql2 := "SELECT book.*,rel.member_id,rel.role_id,m.account as create_name FROM " + m.TableNameWithPrefix() + " AS book" +
-		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ?" +
-		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel1 ON book.book_id=rel1.book_id  AND rel1.role_id=0" +
-		" LEFT JOIN " + NewMember().TableNameWithPrefix() + " AS m ON rel1.member_id=m.member_id " +
+		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ? AND rel.role_id=0" +
+		" LEFT JOIN " + NewMember().TableNameWithPrefix() + " AS m ON rel.member_id=m.member_id " +
 		" WHERE rel.relationship_id > 0 %v ORDER BY book.book_id DESC LIMIT " + fmt.Sprintf("%d,%d", offset, pageSize)
 
 	if len(PrivatelyOwned) > 0 {
 		sql2 = fmt.Sprintf(sql2, " and book.privately_owned="+strconv.Itoa(PrivatelyOwned[0]))
 	}
-
 	_, err = o.Raw(sql2, memberId).QueryRows(&books)
 	if err != nil {
 		logs.Error("分页查询项目列表 => ", err)
@@ -297,7 +298,9 @@ func (m *Book) ThoroughDeleteBook(id int) (err error) {
 	//删除oss中项目对应的文件夹
 	switch utils.StoreType {
 	case utils.StoreLocal: //删除本地存储，记得加上uploads
-		os.Remove(strings.TrimLeft(m.Cover, "/ ")) //删除封面
+		if m.Cover != beego.AppConfig.DefaultString("cover", "/static/images/book.png") {
+			os.Remove(strings.TrimLeft(m.Cover, "/ ")) //删除封面
+		}
 		go store.ModelStoreLocal.DelFromFolder("uploads/projects/" + m.Identify)
 	case utils.StoreOss:
 		go store.ModelStoreOss.DelOssFolder("projects/" + m.Identify)
@@ -316,59 +319,76 @@ func (m *Book) ThoroughDeleteBook(id int) (err error) {
 }
 
 //首页数据
-//TODO:完善根据分类查询数据
+//完善根据分类查询数据
 //orderType:排序条件，可选值：recommend(推荐)、latest（）
-func (m *Book) HomeData(pageIndex, pageSize int, orderType BookOrder, cid int, fields ...string) (books []Book, totalCount int, err error) {
+func (m *Book) HomeData(pageIndex, pageSize int, orderType BookOrder, lang string, cid int, fields ...string) (books []Book, totalCount int, err error) {
 	if cid > 0 { //针对cid>0
-		return m.homeData(pageIndex, pageSize, orderType, cid, fields...)
+		return m.homeData(pageIndex, pageSize, orderType, lang, cid, fields...)
 	}
 	o := orm.NewOrm()
-	order := ""   //排序
-	condStr := "" //查询条件
-	cond := []string{"privately_owned=0"}
+	order := "pin desc" //排序
+	condStr := ""       //查询条件
+	cond := []string{"privately_owned=0", "order_index>=0"}
 	if len(fields) == 0 {
-		fields = append(fields, "book_id", "book_name", "identify", "cover", "order_index")
+		fields = append(fields, "book_id", "book_name", "identify", "cover", "order_index", "pin")
+	} else {
+		fields = append(fields, "pin")
 	}
 	switch orderType {
 	case OrderRecommend: //推荐
 		cond = append(cond, "order_index>0")
-		order = "order_index desc"
+		order = "pin desc,order_index desc"
+	case OrderLatestRecommend: //最新推荐
+		cond = append(cond, "order_index>0")
+		order = "book_id desc"
 	case OrderPopular: //受欢迎
-		order = "star desc,vcnt desc"
-	case OrderLatest: //最新发布
-		order = "release_time desc"
+		order = "pin desc,star desc,vcnt desc"
+	case OrderLatest, OrderNew: //最新发布
+		order = "pin desc,release_time desc"
 	case OrderScore: //评分
-		order = "score desc"
+		order = "pin desc,score desc"
 	case OrderComment: //评论
-		order = "cnt_comment desc"
+		order = "pin desc,cnt_comment desc"
 	case OrderStar: //收藏
-		order = "star desc"
+		order = "pin desc,star desc"
 	case OrderView: //收藏
-		order = "vcnt desc"
+		order = "pin desc,vcnt desc"
 	}
 	if len(cond) > 0 {
 		condStr = " where " + strings.Join(cond, " and ")
 	}
+
+	lang = strings.ToLower(lang)
+	switch lang {
+	case "zh", "en", "other":
+	default:
+		lang = ""
+	}
+	if strings.TrimSpace(lang) != "" {
+		condStr = condStr + " and `lang` = '" + lang + "'"
+	}
 	sqlFmt := "select %v from md_books " + condStr
 	fieldStr := strings.Join(fields, ",")
 	sql := fmt.Sprintf(sqlFmt, fieldStr) + " order by " + order + fmt.Sprintf(" limit %v offset %v", pageSize, (pageIndex-1)*pageSize)
-	sqlCount := fmt.Sprintf(sqlFmt, "count(*) cnt")
+	sqlCount := fmt.Sprintf(sqlFmt, "count(book_id) cnt")
 	var params []orm.Params
 	if _, err := o.Raw(sqlCount).Values(&params); err == nil {
 		if len(params) > 0 {
 			totalCount, _ = strconv.Atoi(params[0]["cnt"].(string))
 		}
 	}
-	_, err = o.Raw(sql).QueryRows(&books)
+	if totalCount > 0 {
+		_, err = o.Raw(sql).QueryRows(&books)
+	}
 	return
 }
 
 //针对cid大于0
-func (m *Book) homeData(pageIndex, pageSize int, orderType BookOrder, cid int, fields ...string) (books []Book, totalCount int, err error) {
+func (m *Book) homeData(pageIndex, pageSize int, orderType BookOrder, lang string, cid int, fields ...string) (books []Book, totalCount int, err error) {
 	o := orm.NewOrm()
 	order := ""   //排序
 	condStr := "" //查询条件
-	cond := []string{"b.privately_owned=0"}
+	cond := []string{"b.privately_owned=0", "b.order_index>=0"}
 	if len(fields) == 0 {
 		fields = append(fields, "book_id", "book_name", "identify", "cover", "order_index")
 	}
@@ -378,7 +398,7 @@ func (m *Book) homeData(pageIndex, pageSize int, orderType BookOrder, cid int, f
 		order = "b.order_index desc"
 	case OrderPopular: //受欢迎
 		order = "b.star desc,b.vcnt desc"
-	case OrderLatest: //最新发布
+	case OrderLatest, OrderNew: //最新发布
 		order = "b.release_time desc"
 	case OrderScore: //评分
 		order = "b.score desc"
@@ -394,6 +414,15 @@ func (m *Book) homeData(pageIndex, pageSize int, orderType BookOrder, cid int, f
 	}
 	if len(cond) > 0 {
 		condStr = " where " + strings.Join(cond, " and ")
+	}
+	lang = strings.ToLower(lang)
+	switch lang {
+	case "zh", "en", "other":
+	default:
+		lang = ""
+	}
+	if strings.TrimSpace(lang) != "" {
+		condStr = condStr + " and `lang` = '" + lang + "'"
 	}
 	sqlFmt := "select %v from md_books b left join md_book_category c on b.book_id=c.book_id" + condStr
 	fieldStr := "b." + strings.Join(fields, ",b.")
@@ -513,6 +542,7 @@ func (book *Book) ToBookResult() (m *BookResult) {
 	m.CntComment = book.CntComment
 	m.Author = book.Author
 	m.AuthorURL = book.AuthorURL
+	m.Lang = book.Lang
 
 	if book.Theme == "" {
 		m.Theme = "default"
@@ -553,18 +583,22 @@ func (m *Book) Replace(bookId int, src, dst string) {
 	}
 }
 
-// 根据书籍id获取书籍
+// 根据书籍id获取(公开的)书籍
 func (m *Book) GetBooksById(id []int, fields ...string) (books []Book, err error) {
 
 	var bs []Book
 	var rows int64
 	var idArr []interface{}
 
+	if len(id) == 0 {
+		return
+	}
+
 	for _, i := range id {
 		idArr = append(idArr, i)
 	}
 
-	rows, err = orm.NewOrm().QueryTable(m).Filter("book_id__in", idArr...).All(&bs, fields...)
+	rows, err = orm.NewOrm().QueryTable(m).Filter("book_id__in", idArr...).Filter("privately_owned", 0).All(&bs, fields...)
 	if rows > 0 {
 		bookMap := make(map[interface{}]Book)
 		for _, book := range bs {

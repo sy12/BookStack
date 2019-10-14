@@ -24,6 +24,7 @@ func (this *HomeController) Index() {
 		cid       int //分类，如果只是一级分类，则忽略，二级分类，则根据二级分类查找内容
 		urlPrefix = beego.URLFor("HomeController.Index")
 		cate      models.Category
+		lang      = this.GetString("lang")
 		tabName   = map[string]string{"recommend": "站长推荐", "latest": "最新发布", "popular": "热门书籍"}
 	)
 
@@ -34,25 +35,32 @@ func (this *HomeController) Index() {
 		tab = "latest"
 	}
 
-	if cid, _ = this.GetInt("cid"); cid > 0 {
-		ModelCate := new(models.Category)
-		cate = ModelCate.Find(cid)
-		this.Data["Cate"] = cate
+	ModelCate := new(models.Category)
+	cates, _ := ModelCate.GetCates(-1, 1)
+	cid, _ = this.GetInt("cid")
+	pid := cid
+	if cid > 0 {
+		for _, item := range cates {
+			if item.Id == cid {
+				if item.Pid > 0 {
+					pid = item.Pid
+				}
+				this.Data["Cate"] = item
+				cate = item
+				break
+			}
+		}
 	}
-
+	this.Data["Cates"] = cates
 	this.Data["Cid"] = cid
+	this.Data["Pid"] = pid
 	this.TplName = "home/index.html"
 	this.Data["IsHome"] = true
-
-	//如果没有开启匿名访问，则跳转到登录页面
-	if !this.EnableAnonymous && this.Member == nil {
-		this.Redirect(beego.URLFor("AccountController.Login"), 302)
-	}
 
 	pageIndex, _ := this.GetInt("page", 1)
 	//每页显示24个，为了兼容Pad、mobile、PC
 	pageSize := 24
-	books, totalCount, err := models.NewBook().HomeData(pageIndex, pageSize, models.BookOrder(tab), cid)
+	books, totalCount, err := models.NewBook().HomeData(pageIndex, pageSize, models.BookOrder(tab), lang, cid)
 	if err != nil {
 		beego.Error(err)
 		this.Abort("404")
@@ -62,6 +70,7 @@ func (this *HomeController) Index() {
 		if cid > 0 {
 			urlSuffix = urlSuffix + "&cid=" + strconv.Itoa(cid)
 		}
+		urlSuffix = urlSuffix + "&lang=" + lang
 		html := utils.NewPaginations(conf.RollPage, totalCount, pageSize, pageIndex, urlPrefix, urlSuffix)
 		this.Data["PageHtml"] = html
 	} else {
@@ -71,6 +80,7 @@ func (this *HomeController) Index() {
 	this.Data["TotalPages"] = int(math.Ceil(float64(totalCount) / float64(pageSize)))
 	this.Data["Lists"] = books
 	this.Data["Tab"] = tab
+	this.Data["Lang"] = lang
 	title := this.Sitename
 
 	if cid > 0 {

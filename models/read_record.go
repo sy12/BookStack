@@ -86,6 +86,8 @@ func (this *ReadRecord) Add(docId, uid int) (err error) {
 			CreateAt: int(time.Now().Unix()),
 		}
 
+		go new(Star).SetLastReadTime(uid, doc.BookId)
+
 		o.QueryTable(tableReadRecord).Filter("doc_id", docId).Filter("uid", uid).One(&r, "id")
 		readCnt := 1
 		if r.Id > 0 { //先删再增，以便根据主键id索引的倒序查询列表
@@ -166,6 +168,23 @@ func (this *ReadRecord) Progress(uid, bookId int) (rp ReadProgress, err error) {
 		}
 		f := float32(rp.Cnt) / float32(rp.Total)
 		rp.Percent = fmt.Sprintf("%.2f", f*100) + "%"
+	}
+	return
+}
+
+//查询阅读进度
+func (this *ReadRecord) BooksProgress(uid int, bookId ...int) (read map[int]int) {
+	read = make(map[int]int)
+	var count []ReadCount
+	orm.NewOrm().QueryTable(new(ReadCount)).Filter("uid", uid).Filter("book_id__in", bookId).All(&count)
+	for _, item := range count {
+		read[item.BookId] = item.Cnt
+	}
+
+	for _, id := range bookId {
+		if _, ok := read[id]; !ok {
+			read[id] = 0
+		}
 	}
 	return
 }
